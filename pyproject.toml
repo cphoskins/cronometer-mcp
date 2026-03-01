@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [
-    { name = "Paul Shortino" },
+    { name = "Paul Hoskins" },
 ]
 keywords = ["cronometer", "mcp", "nutrition", "health", "model-context-protocol"]
 classifiers = [
