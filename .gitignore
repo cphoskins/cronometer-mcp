@@ -12,6 +12,7 @@ venv/
 
 # Environment / credentials
 .env
+.mcpregistry*
 
 # IDE
 .vscode/
