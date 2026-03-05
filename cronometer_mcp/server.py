@@ -301,6 +301,154 @@ def export_raw_csv(
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
+_DIARY_GROUP_MAP: dict[str, int] = {
+    "breakfast": 1,
+    "lunch": 2,
+    "dinner": 3,
+    "snacks": 4,
+}
+
+
+@mcp.tool()
+def search_foods(query: str) -> str:
+    """Search Cronometer's food database by name.
+
+    Returns matching foods with their IDs and source information needed
+    to add a serving (food_id, food_source_id, measure_id).
+
+    Args:
+        query: Food name or keyword to search for (e.g. "eggs", "chicken breast").
+    """
+    try:
+        client = _get_client()
+        foods = client.find_foods(query)
+        return json.dumps(
+            {
+                "status": "success",
+                "query": query,
+                "count": len(foods),
+                "foods": foods,
+            },
+            indent=2,
+        )
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
+@mcp.tool()
+def get_food_details(food_source_id: int) -> str:
+    """Get detailed food information including available serving measures.
+
+    Use this after search_foods to get the measure_id needed for add_food_entry.
+    Returns all available serving sizes with their numeric IDs and gram weights.
+
+    Args:
+        food_source_id: Food source ID from search_foods results.
+    """
+    try:
+        client = _get_client()
+        result = client.get_food(food_source_id)
+        # Remove raw_response from the output to keep it clean
+        output = {
+            "status": "success",
+            "food_source_id": result["food_source_id"],
+            "measures": result["measures"],
+        }
+        return json.dumps(output, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
+@mcp.tool()
+def add_food_entry(
+    food_id: int,
+    food_source_id: int,
+    weight_grams: float,
+    date: str,
+    measure_id: int = 0,
+    quantity: float = 0,
+    diary_group: str = "Breakfast",
+) -> str:
+    """Add a food entry to the Cronometer diary.
+
+    Use search_foods to find food_id and food_source_id, then
+    get_food_details for measure_id and weight_grams.
+
+    For CRDB/custom foods, you can omit measure_id (defaults to a
+    universal NCCDB measure that works for all food sources).
+    When measure_id is omitted, quantity is set to weight_grams.
+
+    Args:
+        food_id: Numeric food ID from search_foods results.
+        food_source_id: Food source ID from search_foods results.
+        weight_grams: Weight of the serving in grams.
+        date: Date to log the entry as YYYY-MM-DD (e.g. "2026-03-04").
+        measure_id: Measure/unit ID. Pass 0 (default) to use the universal
+                    measure that works for all food sources.
+        quantity: Number of servings. Defaults to weight_grams when
+                  measure_id is 0 (universal gram-based measure).
+        diary_group: Meal slot — one of "Breakfast", "Lunch", "Dinner", "Snacks"
+                     (case-insensitive, defaults to "Breakfast").
+    """
+    try:
+        group_key = diary_group.strip().lower()
+        group_int = _DIARY_GROUP_MAP.get(group_key)
+        if group_int is None:
+            return json.dumps({
+                "status": "error",
+                "message": (
+                    f"Invalid diary_group '{diary_group}'. "
+                    "Must be one of: Breakfast, Lunch, Dinner, Snacks."
+                ),
+            })
+
+        if measure_id == 0 and quantity == 0:
+            quantity = weight_grams
+
+        from datetime import date as date_type
+        log_date = date_type.fromisoformat(date)
+
+        client = _get_client()
+        result = client.add_serving(
+            food_id=food_id,
+            food_source_id=food_source_id,
+            measure_id=measure_id,
+            quantity=quantity,
+            weight_grams=weight_grams,
+            day=log_date,
+            diary_group=group_int,
+        )
+        return json.dumps({
+            "status": "success",
+            "entry": result,
+            "note": (
+                "Use the serving_id to remove this entry with remove_food_entry "
+                "if needed."
+            ),
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
+@mcp.tool()
+def remove_food_entry(serving_id: str) -> str:
+    """Remove a food entry from the Cronometer diary.
+
+    Args:
+        serving_id: The serving ID returned by add_food_entry (e.g. "D80lp$").
+    """
+    try:
+        client = _get_client()
+        client.remove_serving(serving_id)
+        return json.dumps({
+            "status": "success",
+            "serving_id": serving_id,
+            "message": "Serving removed from diary.",
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
 def _get_data_dir() -> Path:
     """Get the data directory for sync output.
 
