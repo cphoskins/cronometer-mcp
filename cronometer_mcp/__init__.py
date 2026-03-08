@@ -1,6 +1,6 @@
 """Cronometer MCP Server — nutrition data from Cronometer via MCP."""
 
-__version__ = "2.0.2"
+__version__ = "2.0.3"
 
 from .client import CronometerClient
 from .markdown import generate_food_log_md
