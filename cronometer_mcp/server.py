@@ -309,6 +309,20 @@ _DIARY_GROUP_MAP: dict[str, int] = {
 }
 
 
+def _default_diary_group() -> str:
+    """Pick a meal slot based on current time of day."""
+    from datetime import datetime
+
+    hour = datetime.now().hour
+    if hour < 11:
+        return "breakfast"
+    elif hour < 16:
+        return "lunch"
+    elif hour < 21:
+        return "dinner"
+    return "snacks"
+
+
 @mcp.tool()
 def search_foods(query: str) -> str:
     """Search Cronometer's food database by name.
@@ -367,7 +381,7 @@ def add_food_entry(
     date: str,
     measure_id: int = 0,
     quantity: float = 0,
-    diary_group: str = "Breakfast",
+    diary_group: str | None = None,
 ) -> str:
     """Add a food entry to the Cronometer diary.
 
@@ -388,10 +402,10 @@ def add_food_entry(
         quantity: Number of servings. Defaults to weight_grams when
                   measure_id is 0 (universal gram-based measure).
         diary_group: Meal slot — one of "Breakfast", "Lunch", "Dinner", "Snacks"
-                     (case-insensitive, defaults to "Breakfast").
+                     (case-insensitive). Defaults to time-based selection if omitted.
     """
     try:
-        group_key = diary_group.strip().lower()
+        group_key = (diary_group or _default_diary_group()).strip().lower()
         group_int = _DIARY_GROUP_MAP.get(group_key)
         if group_int is None:
             return json.dumps({
@@ -1053,7 +1067,7 @@ def add_repeat_item(
     food_source_id: int,
     quantity: float,
     food_name: str,
-    diary_group: str = "Breakfast",
+    diary_group: str | None = None,
     days_of_week: str = "all",
 ) -> str:
     """Add a recurring food entry that auto-logs on selected days.
@@ -1069,11 +1083,12 @@ def add_repeat_item(
         quantity: Number of default servings.
         food_name: Display name for the food.
         diary_group: Meal slot — "Breakfast", "Lunch", "Dinner", or "Snacks".
+                     Defaults to time-based selection if omitted.
         days_of_week: Comma-separated day numbers (0=Sun, 1=Mon, ..., 6=Sat),
                       or "all" for every day (default), or "weekdays", or "weekends".
     """
     try:
-        group_key = diary_group.strip().lower()
+        group_key = (diary_group or _default_diary_group()).strip().lower()
         group_int = _DIARY_GROUP_MAP.get(group_key)
         if group_int is None:
             return json.dumps({
