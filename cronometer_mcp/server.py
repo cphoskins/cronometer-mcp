@@ -1049,8 +1049,8 @@ def get_repeated_items() -> str:
 
 @mcp.tool()
 def add_repeat_item(
+    food_id: int,
     food_source_id: int,
-    measure_id: int,
     quantity: float,
     food_name: str,
     diary_group: str = "Breakfast",
@@ -1058,10 +1058,15 @@ def add_repeat_item(
 ) -> str:
     """Add a recurring food entry that auto-logs on selected days.
 
+    Quantity is in default servings for the food (e.g., for coffee where
+    the default serving is 1 cup, quantity=12 means 12 cups).
+
+    Use search_foods to find food_id and food_source_id.
+
     Args:
-        food_source_id: Food source ID from search_foods.
-        measure_id: Measure/unit ID. Use 0 for universal gram-based measure.
-        quantity: Serving quantity (or weight_grams if using universal measure).
+        food_id: Numeric food ID from search_foods results.
+        food_source_id: Food source ID from search_foods results.
+        quantity: Number of default servings.
         food_name: Display name for the food.
         diary_group: Meal slot — "Breakfast", "Lunch", "Dinner", or "Snacks".
         days_of_week: Comma-separated day numbers (0=Sun, 1=Mon, ..., 6=Sat),
@@ -1079,10 +1084,6 @@ def add_repeat_item(
                 ),
             })
 
-        if measure_id == 0:
-            from .client import UNIVERSAL_MEASURE_ID
-            measure_id = UNIVERSAL_MEASURE_ID
-
         # Parse days_of_week
         days_str = days_of_week.strip().lower()
         if days_str == "all":
@@ -1097,7 +1098,7 @@ def add_repeat_item(
         client = _get_client()
         client.add_repeat_item(
             food_source_id=food_source_id,
-            measure_id=measure_id,
+            food_id=food_id,
             quantity=quantity,
             food_name=food_name,
             diary_group=group_int,

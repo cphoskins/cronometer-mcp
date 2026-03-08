@@ -1515,7 +1515,7 @@ class TestAddRepeatItem:
         )
         result = c.add_repeat_item(
             food_source_id=1055762,
-            measure_id=461776,
+            food_id=1055762,
             quantity=1.0,
             food_name="Wasa Crispbread",
         )
@@ -1531,7 +1531,7 @@ class TestAddRepeatItem:
         )
         c.add_repeat_item(
             food_source_id=1055762,
-            measure_id=461776,
+            food_id=1055762,
             quantity=1.0,
             food_name="Wasa Crispbread",
         )
@@ -1549,7 +1549,7 @@ class TestAddRepeatItem:
         )
         c.add_repeat_item(
             food_source_id=1055762,
-            measure_id=461776,
+            food_id=1055762,
             quantity=1.0,
             food_name="Test",
         )
@@ -1567,7 +1567,7 @@ class TestAddRepeatItem:
         )
         c.add_repeat_item(
             food_source_id=1055762,
-            measure_id=461776,
+            food_id=1055762,
             quantity=1.0,
             food_name="Test",
             days_of_week=[1, 3, 5],  # Mon, Wed, Fri
@@ -1587,7 +1587,7 @@ class TestAddRepeatItem:
         with pytest.raises(RuntimeError, match="GWT-RPC call failed"):
             c.add_repeat_item(
                 food_source_id=1055762,
-                measure_id=461776,
+                food_id=1055762,
                 quantity=1.0,
                 food_name="Test",
             )

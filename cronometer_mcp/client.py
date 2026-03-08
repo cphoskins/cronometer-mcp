@@ -309,9 +309,9 @@ GWT_ADD_REPEAT_ITEM = (
     "java.util.ArrayList/4159755760|"
     "java.lang.Integer/3438268394|"
     "{food_name}|"
-    "1|2|3|4|3|5|6|7|8|{user_id}|7|{diary_group}|"
+    "1|2|3|4|3|5|6|7|8|{user_id}|7|{quantity}|"
     "9|{day_count}|{day_entries}|"
-    "0|11|{quantity}|0|{measure_id}|{food_source_id}|0|"
+    "0|11|{diary_group}|0|{food_source_id}|{food_id}|0|"
 )
 
 GWT_DELETE_REPEAT_ITEM = (
@@ -2375,7 +2375,7 @@ class CronometerClient:
     def add_repeat_item(
         self,
         food_source_id: int,
-        measure_id: int,
+        food_id: int,
         quantity: float,
         food_name: str,
         diary_group: int = 1,
@@ -2385,9 +2385,8 @@ class CronometerClient:
 
         Args:
             food_source_id: Food source ID from search_foods.
-            measure_id: Measure/unit ID. Use UNIVERSAL_MEASURE_ID with
-                        quantity=weight_grams for reliable results.
-            quantity: Serving quantity (or weight_grams if using universal measure).
+            food_id: Food ID from search_foods.
+            quantity: Number of default servings (e.g., 12 cups of coffee).
             food_name: Display name for the food.
             diary_group: Meal slot — 1=Breakfast, 2=Lunch, 3=Dinner, 4=Snacks.
             days_of_week: List of days (0=Sun, 1=Mon, ..., 6=Sat).
@@ -2404,7 +2403,7 @@ class CronometerClient:
         # Build day entries: "10|{day}" for each day, joined by "|"
         day_entries = "|".join(f"10|{d}" for d in days_of_week)
 
-        # Format quantity
+        # Format quantity as float-like string for GWT
         qty_str = str(int(quantity)) if quantity == int(quantity) else str(quantity)
 
         body = (
@@ -2417,8 +2416,8 @@ class CronometerClient:
             .replace("{day_count}", str(len(days_of_week)))
             .replace("{day_entries}", day_entries)
             .replace("{quantity}", qty_str)
-            .replace("{measure_id}", str(measure_id))
             .replace("{food_source_id}", str(food_source_id))
+            .replace("{food_id}", str(food_id))
         )
         raw = self._gwt_post(body)
         if not raw.startswith("//OK"):
