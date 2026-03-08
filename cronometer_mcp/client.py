@@ -863,7 +863,7 @@ class CronometerClient:
             .replace("{month}", str(day.month))
             .replace("{year}", str(day.year))
             .replace("{quantity}", quantity_str)
-            .replace("{diary_group}", "1")
+            .replace("{diary_group}", str(diary_group))
             .replace("{measure_id}", str(encoded_measure))
             .replace("{weight_grams}", weight_str)
             .replace("{food_source_id}", str(food_source_id))
