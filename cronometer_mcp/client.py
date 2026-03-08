@@ -139,6 +139,40 @@ GWT_UPDATE_DAILY_TARGET_TEMPLATE = (
     "10|{calories}|10|{fat}|0|1|0|0|0|12|10|{protein}|0|"
 )
 
+GWT_GET_MACRO_TARGET_TEMPLATES = (
+    "7|0|7|https://cronometer.com/cronometer/|"
+    "{gwt_header}|"
+    "com.cronometer.shared.rpc.CronometerService|"
+    "getMacroTargetTemplates|java.lang.String/2004016611|"
+    "I|{nonce}|"
+    "1|2|3|4|2|5|6|7|{user_id}|"
+)
+
+GWT_SAVE_MACRO_SCHEDULE = (
+    "7|0|9|https://cronometer.com/cronometer/|"
+    "{gwt_header}|"
+    "com.cronometer.shared.rpc.CronometerService|"
+    "saveMacroSchedule|java.lang.String/2004016611|"
+    "I|com.cronometer.shared.targets.DayOfWeek/913617675|"
+    "{nonce}|"
+    "com.cronometer.shared.targets.DayOfWeek$DayOfWeekEnum/3974900421|"
+    "1|2|3|4|4|5|6|7|6|8|{user_id}|7|9|{day_of_week}|{template_id}|"
+)
+
+GWT_DELETE_MACRO_TARGET_TEMPLATE = (
+    "7|0|7|https://cronometer.com/cronometer/|"
+    "{gwt_header}|"
+    "com.cronometer.shared.rpc.CronometerService|"
+    "deleteMacroTargetTemplate|java.lang.String/2004016611|"
+    "I|{nonce}|"
+    "1|2|3|4|3|5|6|6|7|{user_id}|{template_id}|"
+)
+
+# US ordering (getAllMacroSchedules) to ISO ordering (saveMacroSchedule)
+# getAllMacroSchedules: 0=Sun, 1=Mon, ..., 6=Sat
+# saveMacroSchedule:   0=Mon, 1=Tue, ..., 6=Sun
+_US_TO_ISO_DOW = {0: 6, 1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
+
 EXPORT_TYPES = {
     "servings": "servings",
     "daily_summary": "dailySummary",
@@ -1305,4 +1339,282 @@ class CronometerClient:
             return True
         raise RuntimeError(
             f"updateDailyTargetTemplate failed: {raw[:300]}"
+        )
+
+    def get_macro_target_templates(self) -> list[dict]:
+        """Get all saved macro target templates.
+
+        Returns:
+            List of dicts with keys: template_id, template_name,
+            protein_g, fat_g, calories, carbs_g.
+        """
+        self.authenticate()
+        body = (
+            GWT_GET_MACRO_TARGET_TEMPLATES
+            .replace("{gwt_header}", self.gwt_header)
+            .replace("{nonce}", self.nonce or "")
+            .replace("{user_id}", self.user_id or "")
+        )
+        raw = self._gwt_post(body)
+        return self._parse_macro_target_templates(raw)
+
+    @staticmethod
+    def _parse_macro_target_templates(raw: str) -> list[dict]:
+        """Parse getMacroTargetTemplates GWT response.
+
+        Returns list of template dicts with id, name, and macro values.
+        """
+        if not raw.startswith("//OK["):
+            return []
+
+        string_table = CronometerClient._extract_gwt_string_table(raw)
+        tokens = CronometerClient._tokenize_gwt_data(raw, string_table)
+
+        # Find MacroTargetTemplate type index
+        template_type_idx = None
+        for idx, entry in enumerate(string_table):
+            if "MacroTargetTemplate/" in entry:
+                template_type_idx = idx + 1
+                break
+
+        if template_type_idx is None:
+            return []
+
+        # Find block boundaries by locating each template type ref
+        # or back-reference. First occurrence is the type ref,
+        # subsequent are back-refs (negative).
+        first_pos = None
+        for i, token in enumerate(tokens):
+            if token == template_type_idx:
+                first_pos = i
+                break
+
+        if first_pos is None:
+            return []
+
+        block_size = first_pos + 1
+
+        # Extract template names from string table
+        template_name_map = {}
+        for idx, entry in enumerate(string_table):
+            if (
+                not entry.startswith("com.")
+                and not entry.startswith("java.")
+                and not entry.startswith("[")
+            ):
+                template_name_map[idx + 1] = entry
+                template_name_map[-(idx + 1)] = entry
+
+        templates = []
+        block_idx = 0
+        while True:
+            start = block_idx * block_size
+            end = start + block_size
+            if end > len(tokens):
+                break
+
+            block = tokens[start:end]
+
+            # Extract floats: [protein, fat, calories, carbs]
+            floats = [t for t in block if isinstance(t, float)]
+
+            # Extract template name
+            name = ""
+            for t in block:
+                if isinstance(t, int) and t in template_name_map:
+                    name = template_name_map[t]
+
+            # Extract template ID: large int > string table size
+            template_id = 0
+            for t in block:
+                if isinstance(t, int) and t > len(string_table):
+                    template_id = t
+                    break
+
+            if len(floats) >= 4:
+                templates.append({
+                    "template_id": template_id,
+                    "template_name": name,
+                    "protein_g": floats[0],
+                    "fat_g": floats[1],
+                    "calories": floats[2],
+                    "carbs_g": floats[3],
+                })
+
+            block_idx += 1
+
+        return templates
+
+    def save_macro_schedule(
+        self,
+        day_of_week_us: int,
+        template_id: int,
+    ) -> bool:
+        """Assign a macro template to a day of the week in the schedule.
+
+        Args:
+            day_of_week_us: Day of week in US ordering (0=Sunday, 6=Saturday).
+            template_id: Template ID from get_macro_target_templates().
+                         Use 0 for the default profile targets.
+
+        Returns:
+            True on success.
+        """
+        self.authenticate()
+
+        # Convert US ordering (0=Sun) to ISO ordering (0=Mon) for the API
+        iso_dow = _US_TO_ISO_DOW[day_of_week_us]
+
+        body = (
+            GWT_SAVE_MACRO_SCHEDULE
+            .replace("{gwt_header}", self.gwt_header)
+            .replace("{nonce}", self.nonce or "")
+            .replace("{user_id}", self.user_id or "")
+            .replace("{day_of_week}", str(iso_dow))
+            .replace("{template_id}", str(template_id))
+        )
+        raw = self._gwt_post(body)
+        if "//OK" in raw:
+            logger.info(
+                "Set macro schedule: day_of_week=%d (US) -> %d (ISO), "
+                "template_id=%d",
+                day_of_week_us, iso_dow, template_id,
+            )
+            return True
+        raise RuntimeError(
+            f"saveMacroSchedule failed: {raw[:300]}"
+        )
+
+    def save_macro_target_template(
+        self,
+        template_name: str,
+        protein_g: float,
+        fat_g: float,
+        carbs_g: float,
+        calories: float,
+    ) -> int:
+        """Create a new saved macro target template.
+
+        Args:
+            template_name: Name for the template.
+            protein_g: Protein target in grams.
+            fat_g: Fat target in grams.
+            carbs_g: Net carbs target in grams.
+            calories: Calorie target.
+
+        Returns:
+            The template_id assigned by the server.
+        """
+        self.authenticate()
+
+        def _fmt(v: float) -> str:
+            return str(int(v)) if v == int(v) else str(v)
+
+        # Build the GWT-RPC payload dynamically because the fat field
+        # uses object back-references when fat == carbs (GWT optimization).
+        # String table positions (1-indexed):
+        #  1=module, 2=gwt_header, 3=service, 4=method, 5=String type,
+        #  6=I type, 7=MacroTargetTemplate type, 8=nonce, 9=Boolean type,
+        #  10=Double type, 11=Integer type, 12=Rigorous, 13=template_name
+        carbs_str = _fmt(carbs_g)
+        fat_str = _fmt(fat_g)
+        cal_str = _fmt(calories)
+        protein_str = _fmt(protein_g)
+
+        if fat_g == carbs_g:
+            # Fat equals carbs: use back-reference -3 (refers to
+            # the Double object at position 3 in the object stream)
+            fat_token = "-3"
+        else:
+            # Fat differs: encode explicitly
+            fat_token = f"10|{fat_str}"
+
+        # The data section encodes the MacroTargetTemplate fields.
+        # Field order: boolean, carbs, fat, null, calories,
+        #   [extra fields], template_id(0=new), program("Rigorous"),
+        #   null, template_name, protein, [trailing ref]
+        #
+        # When fat==carbs, trailing back-refs like -6 refer to
+        # Double(calories). When fat!=carbs, the object positions
+        # shift so we use explicit values instead.
+        if fat_g == carbs_g:
+            data = (
+                f"8|{self.user_id}|"
+                f"7|9|0|10|{carbs_str}|-3|0|10|{cal_str}|-3|-3|0|"
+                f"11|0|12|0|13|10|{protein_str}|-6|"
+            )
+        else:
+            data = (
+                f"8|{self.user_id}|"
+                f"7|9|0|10|{carbs_str}|10|{fat_str}|0|10|{cal_str}|"
+                f"10|{fat_str}|10|{fat_str}|0|"
+                f"11|0|12|0|13|10|{protein_str}|10|{cal_str}|"
+            )
+
+        header = (
+            "7|0|13|https://cronometer.com/cronometer/|"
+            f"{self.gwt_header}|"
+            "com.cronometer.shared.rpc.CronometerService|"
+            "saveMacroTargetTemplate|java.lang.String/2004016611|"
+            "I|com.cronometer.shared.targets.models.MacroTargetTemplate/"
+            "3691130822|"
+            f"{self.nonce or ''}|"
+            "java.lang.Boolean/476441737|"
+            "java.lang.Double/858496421|"
+            "java.lang.Integer/3438268394|"
+            "Rigorous|"
+            f"{template_name}|"
+            "1|2|3|4|3|5|6|7|"
+        )
+
+        body = header + data
+        raw = self._gwt_post(body)
+
+        if "//OK" not in raw:
+            raise RuntimeError(
+                f"saveMacroTargetTemplate failed: {raw[:300]}"
+            )
+
+        logger.info(
+            "Created macro target template '%s': protein=%.1fg, "
+            "fat=%.1fg, carbs=%.1fg, calories=%.0f",
+            template_name, protein_g, fat_g, carbs_g, calories,
+        )
+
+        # Fetch templates to get the server-assigned template_id
+        templates = self.get_macro_target_templates()
+        for t in templates:
+            if t["template_name"] == template_name:
+                return t["template_id"]
+
+        # Template was created but not found — return 0 as fallback
+        logger.warning(
+            "Template '%s' created but not found in template list",
+            template_name,
+        )
+        return 0
+
+    def delete_macro_target_template(self, template_id: int) -> bool:
+        """Delete a saved macro target template.
+
+        Args:
+            template_id: Template ID to delete.
+
+        Returns:
+            True on success.
+        """
+        self.authenticate()
+        body = (
+            GWT_DELETE_MACRO_TARGET_TEMPLATE
+            .replace("{gwt_header}", self.gwt_header)
+            .replace("{nonce}", self.nonce or "")
+            .replace("{user_id}", self.user_id or "")
+            .replace("{template_id}", str(template_id))
+        )
+        raw = self._gwt_post(body)
+        if "//OK" in raw:
+            logger.info("Deleted macro target template: id=%d", template_id)
+            return True
+        raise RuntimeError(
+            f"deleteMacroTargetTemplate failed: {raw[:300]}"
         )

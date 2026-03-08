@@ -543,6 +543,177 @@ def set_macro_targets(
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
+_DOW_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday",
+              "Thursday", "Friday", "Saturday"]
+
+
+@mcp.tool()
+def set_weekly_macro_schedule(
+    template_name: str,
+    days: str = "all",
+) -> str:
+    """Set the recurring weekly macro schedule by assigning a template to days.
+
+    This updates the DEFAULT schedule that applies to all future dates,
+    not just a specific date override.
+
+    First finds the template by name (from existing saved templates or
+    from a recently created per-date template), then assigns it to the
+    specified days of the week.
+
+    Args:
+        template_name: Name of a saved macro target template
+                       (e.g. "Retatrutide GI-Optimized", "Keto Rigorous").
+        days: Comma-separated day names or "all" (default).
+              E.g. "Monday,Wednesday,Friday" or "all".
+    """
+    try:
+        client = _get_client()
+
+        # Get available templates
+        templates = client.get_macro_target_templates()
+        template_map = {t["template_name"]: t for t in templates}
+
+        if template_name not in template_map:
+            return json.dumps({
+                "status": "error",
+                "message": f"Template '{template_name}' not found.",
+                "available_templates": [t["template_name"] for t in templates],
+            }, indent=2)
+
+        template_id = template_map[template_name]["template_id"]
+
+        # Parse which days to update
+        if days.strip().lower() == "all":
+            target_days = list(range(7))  # 0=Sun through 6=Sat (US ordering)
+        else:
+            day_name_map = {name.lower(): i for i, name in enumerate(_DOW_NAMES)}
+            target_days = []
+            for d in days.split(","):
+                d = d.strip().lower()
+                if d in day_name_map:
+                    target_days.append(day_name_map[d])
+                else:
+                    return json.dumps({
+                        "status": "error",
+                        "message": f"Invalid day name: '{d}'",
+                        "valid_days": _DOW_NAMES,
+                    }, indent=2)
+
+        # Apply template to each day
+        results = []
+        for dow in target_days:
+            client.save_macro_schedule(dow, template_id)
+            results.append({
+                "day": _DOW_NAMES[dow],
+                "template_name": template_name,
+                "template_id": template_id,
+            })
+
+        # Read back the full schedule to confirm
+        updated_schedule = client.get_all_macro_schedules()
+
+        return json.dumps({
+            "status": "success",
+            "days_updated": results,
+            "current_schedule": updated_schedule,
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
+@mcp.tool()
+def list_macro_templates() -> str:
+    """List all saved macro target templates in Cronometer.
+
+    Returns template names, IDs, and their macro values.
+    Use this to find the template_name for set_weekly_macro_schedule.
+    """
+    try:
+        client = _get_client()
+        templates = client.get_macro_target_templates()
+        return json.dumps({
+            "status": "success",
+            "count": len(templates),
+            "templates": templates,
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
+@mcp.tool()
+def create_macro_template(
+    template_name: str,
+    protein_grams: float,
+    fat_grams: float,
+    carbs_grams: float,
+    calories: float,
+    assign_to_all_days: bool = False,
+) -> str:
+    """Create a new saved macro target template in Cronometer.
+
+    Optionally assigns it to all days of the week as the recurring default.
+
+    Args:
+        template_name: Name for the new template (e.g. "Retatrutide GI-Optimized").
+        protein_grams: Protein target in grams.
+        fat_grams: Fat target in grams.
+        carbs_grams: Net carbs target in grams.
+        calories: Calorie target in kcal.
+        assign_to_all_days: If True, also set this as the recurring weekly
+                            schedule for all 7 days (default False).
+    """
+    try:
+        client = _get_client()
+
+        # Check if template already exists
+        existing = client.get_macro_target_templates()
+        for t in existing:
+            if t["template_name"] == template_name:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        f"Template '{template_name}' already exists "
+                        f"(id={t['template_id']}). Use set_weekly_macro_schedule "
+                        "to assign it to days."
+                    ),
+                    "existing_template": t,
+                }, indent=2)
+
+        # Create the template
+        template_id = client.save_macro_target_template(
+            template_name=template_name,
+            protein_g=protein_grams,
+            fat_g=fat_grams,
+            carbs_g=carbs_grams,
+            calories=calories,
+        )
+
+        result = {
+            "status": "success",
+            "template_name": template_name,
+            "template_id": template_id,
+            "macros": {
+                "protein_g": protein_grams,
+                "fat_g": fat_grams,
+                "carbs_g": carbs_grams,
+                "calories": calories,
+            },
+        }
+
+        # Optionally assign to all days
+        if assign_to_all_days and template_id:
+            for dow in range(7):
+                client.save_macro_schedule(dow, template_id)
+            schedule = client.get_all_macro_schedules()
+            result["weekly_schedule_updated"] = True
+            result["current_schedule"] = schedule
+
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
 def _get_data_dir() -> Path:
     """Get the data directory for sync output.
 
