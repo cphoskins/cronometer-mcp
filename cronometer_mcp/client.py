@@ -168,6 +168,49 @@ GWT_DELETE_MACRO_TARGET_TEMPLATE = (
     "1|2|3|4|3|5|6|6|7|{user_id}|{template_id}|"
 )
 
+# --- Biometric GWT templates ---
+
+GWT_GET_RECENT_BIOMETRICS = (
+    "7|0|7|https://cronometer.com/cronometer/|"
+    "{gwt_header}|"
+    "com.cronometer.shared.rpc.CronometerService|"
+    "getRecentBiometrics|java.lang.String/2004016611|"
+    "I|{nonce}|"
+    "1|2|3|4|2|5|6|7|{user_id}|"
+)
+
+GWT_ADD_BIOMETRIC = (
+    "7|0|9|https://cronometer.com/cronometer/|"
+    "{gwt_header}|"
+    "com.cronometer.shared.rpc.CronometerService|"
+    "addBiometric|java.lang.String/2004016611|"
+    "com.cronometer.shared.biometrics.Biometric/2989635787|"
+    "I|{nonce}|"
+    "com.cronometer.shared.entries.models.Day/782579793|"
+    "1|2|3|4|3|5|6|7|8|6|"
+    "{value}|9|{day}|{month}|{year}|0|A|0|1|0|{flags}|"
+    "0|0|0|0|0|{metric_position}|0|{user_id}|"
+)
+
+GWT_REMOVE_MEASUREMENT = (
+    "7|0|8|https://cronometer.com/cronometer/|"
+    "{gwt_header}|"
+    "com.cronometer.shared.rpc.CronometerService|"
+    "removeMeasurement|java.lang.String/2004016611|"
+    "J|I|{nonce}|"
+    "1|2|3|4|3|5|6|7|8|{biometric_id}|{user_id}|"
+)
+
+# Known biometric metric types and their addBiometric flags/position
+# flags encodes metric type + unit preferences
+# metric_position is the position in the Biometric object structure
+_BIOMETRIC_TYPES = {
+    "weight": {"flags": 65539, "metric_position": 2, "unit": "lbs"},
+    "blood_glucose": {"flags": 196609, "metric_position": 2, "unit": "mg/dL"},
+    "heart_rate": {"flags": 65540, "metric_position": 2, "unit": "bpm"},
+    "body_fat": {"flags": 65539, "metric_position": 2, "unit": "%"},
+}
+
 # --- Fasting GWT templates ---
 
 GWT_GET_USER_FASTS = (
@@ -1955,3 +1998,236 @@ class CronometerClient:
             block_idx += 1
 
         return fasts
+
+    # --- Biometric methods ---
+
+    def get_recent_biometrics(self) -> list[dict]:
+        """Get the most recently logged biometric entries.
+
+        Returns:
+            List of dicts with keys: biometric_id, metric_id, value,
+            date, metric_name (if available).
+        """
+        self.authenticate()
+        body = (
+            GWT_GET_RECENT_BIOMETRICS
+            .replace("{gwt_header}", self.gwt_header)
+            .replace("{nonce}", self.nonce or "")
+            .replace("{user_id}", self.user_id or "")
+        )
+        raw = self._gwt_post(body)
+        return self._parse_recent_biometrics(raw)
+
+    def add_biometric(
+        self,
+        metric_type: str,
+        value: float,
+        day: date,
+    ) -> str:
+        """Add a biometric entry.
+
+        Args:
+            metric_type: One of 'weight', 'blood_glucose', 'heart_rate',
+                         'body_fat'.
+            value: The value in display units (lbs, mg/dL, bpm, %).
+            day: Date for the entry.
+
+        Returns:
+            The biometric entry ID (string).
+        """
+        self.authenticate()
+
+        if metric_type not in _BIOMETRIC_TYPES:
+            raise ValueError(
+                f"Unknown metric_type '{metric_type}'. "
+                f"Supported: {list(_BIOMETRIC_TYPES.keys())}"
+            )
+
+        info = _BIOMETRIC_TYPES[metric_type]
+
+        def _fmt(v: float) -> str:
+            return str(int(v)) if v == int(v) else str(v)
+
+        body = (
+            GWT_ADD_BIOMETRIC
+            .replace("{gwt_header}", self.gwt_header)
+            .replace("{nonce}", self.nonce or "")
+            .replace("{user_id}", self.user_id or "")
+            .replace("{value}", _fmt(value))
+            .replace("{day}", str(day.day))
+            .replace("{month}", str(day.month))
+            .replace("{year}", str(day.year))
+            .replace("{flags}", str(info["flags"]))
+            .replace("{metric_position}", str(info["metric_position"]))
+        )
+        raw = self._gwt_post(body)
+
+        if "//OK" not in raw:
+            raise RuntimeError(f"addBiometric failed: {raw[:300]}")
+
+        # Extract biometric ID from response: //OK["BXW0DA",[],0,7]
+        biometric_id = ""
+        if raw.startswith("//OK["):
+            import re
+            match = re.search(r'"([A-Za-z0-9]+)"', raw)
+            if match:
+                biometric_id = match.group(1)
+
+        logger.info(
+            "Added biometric: type=%s, value=%.1f, date=%s, id=%s",
+            metric_type, value, day, biometric_id,
+        )
+        return biometric_id
+
+    def remove_biometric(self, biometric_id: str) -> bool:
+        """Remove a biometric entry.
+
+        Args:
+            biometric_id: The biometric entry ID (e.g. "BXW0DA").
+
+        Returns:
+            True on success.
+        """
+        self.authenticate()
+        body = (
+            GWT_REMOVE_MEASUREMENT
+            .replace("{gwt_header}", self.gwt_header)
+            .replace("{nonce}", self.nonce or "")
+            .replace("{user_id}", self.user_id or "")
+            .replace("{biometric_id}", biometric_id)
+        )
+        raw = self._gwt_post(body)
+        if "//OK" in raw:
+            logger.info("Removed biometric: id=%s", biometric_id)
+            return True
+        raise RuntimeError(f"removeMeasurement failed: {raw[:300]}")
+
+    @staticmethod
+    def _parse_recent_biometrics(raw: str) -> list[dict]:
+        """Parse getRecentBiometrics GWT response.
+
+        Returns list of biometric entries with id, metric_id, value, date.
+        """
+        if not raw.startswith("//OK["):
+            return []
+
+        string_table = CronometerClient._extract_gwt_string_table(raw)
+        tokens = CronometerClient._tokenize_gwt_data(raw, string_table)
+
+        # Find the Biometric type in string table
+        bio_type_idx = None
+        for idx, entry in enumerate(string_table):
+            if "biometrics.Biometric/" in entry and "[L" not in entry:
+                bio_type_idx = idx + 1
+                break
+
+        if bio_type_idx is None:
+            return []
+
+        # Find Day type
+        day_type_idx = None
+        for idx, entry in enumerate(string_table):
+            if "models.Day/" in entry:
+                day_type_idx = idx + 1
+                break
+
+        # Find first Biometric type ref to determine block size
+        first_bio_pos = None
+        for i, token in enumerate(tokens):
+            if token == bio_type_idx:
+                first_bio_pos = i
+                break
+
+        if first_bio_pos is None:
+            return []
+
+        block_size = first_bio_pos + 1
+
+        # Extract meaningful strings (biometric IDs, composite JSON, etc.)
+        meaningful_strings = {}
+        for idx, entry in enumerate(string_table):
+            if (
+                not entry.startswith("com.")
+                and not entry.startswith("java.")
+                and not entry.startswith("[")
+            ):
+                meaningful_strings[idx + 1] = entry
+                meaningful_strings[-(idx + 1)] = entry
+
+        biometrics = []
+        block_idx = 0
+        while True:
+            start = block_idx * block_size
+            end = start + block_size
+            if end > len(tokens):
+                break
+
+            block = tokens[start:end]
+
+            # Extract floats (biometric value)
+            floats = [t for t in block if isinstance(t, float)]
+
+            # Extract strings (biometric ID, composite JSON)
+            block_strings = []
+            for t in block:
+                if isinstance(t, str):
+                    block_strings.append(t)
+                elif isinstance(t, int) and t in meaningful_strings:
+                    block_strings.append(meaningful_strings[t])
+
+            # Extract large ints (metric_id, user_id, flags)
+            large_ints = [
+                t for t in block
+                if isinstance(t, int)
+                and abs(t) > len(string_table)
+            ]
+
+            # Build entry
+            entry = {
+                "biometric_id": "",
+                "value": floats[0] if floats else 0.0,
+                "metric_id": 0,
+                "date": "",
+            }
+
+            # Biometric IDs are short alphanumeric strings (6-8 chars)
+            for s in block_strings:
+                if (
+                    len(s) >= 4 and len(s) <= 12
+                    and s.isalnum()
+                    and not s.startswith("com")
+                ):
+                    entry["biometric_id"] = s
+                elif s.startswith("{"):
+                    # Composite JSON (blood pressure, etc.)
+                    entry["composite"] = s
+
+            # Extract date: look for 3 consecutive small ints that
+            # could be day/month/year
+            for i in range(len(block) - 2):
+                if (
+                    isinstance(block[i], int)
+                    and isinstance(block[i + 1], int)
+                    and isinstance(block[i + 2], int)
+                    and 1 <= block[i] <= 31
+                    and 1 <= block[i + 1] <= 12
+                    and 2020 <= block[i + 2] <= 2030
+                ):
+                    entry["date"] = (
+                        f"{block[i + 2]:04d}-{block[i + 1]:02d}-"
+                        f"{block[i]:02d}"
+                    )
+                    break
+
+            # metric_id is typically in the large_ints
+            for val in large_ints:
+                if val < 100000 and val != int(self.user_id or 0):
+                    entry["metric_id"] = val
+                    break
+
+            if entry["biometric_id"] or entry["value"]:
+                biometrics.append(entry)
+
+            block_idx += 1
+
+        return biometrics

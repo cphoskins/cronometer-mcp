@@ -812,6 +812,84 @@ def cancel_active_fast(fast_id: int) -> str:
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
+@mcp.tool()
+def get_recent_biometrics() -> str:
+    """Get the most recently logged biometric entries from Cronometer.
+
+    Returns recent values for weight, blood glucose, blood pressure,
+    heart rate, body fat, and other tracked biometrics.
+    """
+    try:
+        client = _get_client()
+        biometrics = client.get_recent_biometrics()
+        return json.dumps({
+            "status": "success",
+            "count": len(biometrics),
+            "biometrics": biometrics,
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
+@mcp.tool()
+def add_biometric(
+    metric_type: str,
+    value: float,
+    entry_date: str,
+) -> str:
+    """Add a biometric entry to Cronometer.
+
+    Supported metric types: weight (lbs), blood_glucose (mg/dL),
+    heart_rate (bpm), body_fat (%).
+
+    Args:
+        metric_type: One of 'weight', 'blood_glucose', 'heart_rate', 'body_fat'.
+        value: The value in display units (lbs, mg/dL, bpm, %).
+        entry_date: Date as YYYY-MM-DD.
+    """
+    try:
+        from datetime import date as date_type
+
+        client = _get_client()
+        day = date_type.fromisoformat(entry_date)
+        biometric_id = client.add_biometric(
+            metric_type=metric_type,
+            value=value,
+            day=day,
+        )
+        return json.dumps({
+            "status": "success",
+            "metric_type": metric_type,
+            "value": value,
+            "date": entry_date,
+            "biometric_id": biometric_id,
+            "note": "Use biometric_id with remove_biometric to delete this entry.",
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
+@mcp.tool()
+def remove_biometric(biometric_id: str) -> str:
+    """Remove a biometric entry from Cronometer.
+
+    Use get_recent_biometrics to find biometric_id values.
+
+    Args:
+        biometric_id: The biometric entry ID (e.g. "BXW0DA").
+    """
+    try:
+        client = _get_client()
+        client.remove_biometric(biometric_id)
+        return json.dumps({
+            "status": "success",
+            "biometric_id": biometric_id,
+            "message": "Biometric entry removed.",
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
 def _get_data_dir() -> Path:
     """Get the data directory for sync output.
 
