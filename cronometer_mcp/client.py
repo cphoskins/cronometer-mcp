@@ -262,6 +262,67 @@ GWT_CANCEL_FAST_KEEP_SERIES = (
     "1|2|3|4|3|5|6|6|7|{user_id}|{fast_id}|"
 )
 
+# --- Diary operations GWT templates ---
+
+GWT_COPY_DAY = (
+    "7|0|8|https://cronometer.com/cronometer/|"
+    "{gwt_header}|"
+    "com.cronometer.shared.rpc.CronometerService|"
+    "copyDay|java.lang.String/2004016611|"
+    "I|com.cronometer.shared.entries.models.Day/782579793|"
+    "{nonce}|"
+    "1|2|3|4|4|5|6|7|7|8|{user_id}|"
+    "7|{src_day}|{src_month}|{src_year}|"
+    "7|{dst_day}|{dst_month}|{dst_year}|"
+)
+
+GWT_SET_DAY_COMPLETE = (
+    "7|0|9|https://cronometer.com/cronometer/|"
+    "{gwt_header}|"
+    "com.cronometer.shared.rpc.CronometerService|"
+    "setDayComplete|java.lang.String/2004016611|"
+    "I|com.cronometer.shared.entries.models.Day/782579793|"
+    "java.lang.Boolean/476441737|"
+    "{nonce}|"
+    "1|2|3|4|4|5|6|7|8|9|{user_id}|"
+    "7|{day}|{month}|{year}|{complete}|"
+)
+
+# --- Repeat item GWT templates ---
+
+GWT_GET_REPEATED_ITEMS = (
+    "7|0|7|https://cronometer.com/cronometer/|"
+    "{gwt_header}|"
+    "com.cronometer.shared.rpc.CronometerService|"
+    "getRepeatedItems|java.lang.String/2004016611|"
+    "I|{nonce}|"
+    "1|2|3|4|2|5|6|7|{user_id}|"
+)
+
+GWT_ADD_REPEAT_ITEM = (
+    "7|0|11|https://cronometer.com/cronometer/|"
+    "{gwt_header}|"
+    "com.cronometer.shared.rpc.CronometerService|"
+    "addRepeatItem|java.lang.String/2004016611|"
+    "I|com.cronometer.shared.repeatitems.RepeatItem/477684891|"
+    "{nonce}|"
+    "java.util.ArrayList/4159755760|"
+    "java.lang.Integer/3438268394|"
+    "{food_name}|"
+    "1|2|3|4|3|5|6|7|8|{user_id}|7|{diary_group}|"
+    "9|{day_count}|{day_entries}|"
+    "0|11|{quantity}|0|{measure_id}|{food_source_id}|0|"
+)
+
+GWT_DELETE_REPEAT_ITEM = (
+    "7|0|7|https://cronometer.com/cronometer/|"
+    "{gwt_header}|"
+    "com.cronometer.shared.rpc.CronometerService|"
+    "deleteRepeatItem|java.lang.String/2004016611|"
+    "I|{nonce}|"
+    "1|2|3|4|3|5|6|6|7|{user_id}|{repeat_item_id}|"
+)
+
 # US ordering (getAllMacroSchedules) to ISO ordering (saveMacroSchedule)
 # getAllMacroSchedules: 0=Sun, 1=Mon, ..., 6=Sat
 # saveMacroSchedule:   0=Mon, 1=Tue, ..., 6=Sun
@@ -2102,8 +2163,7 @@ class CronometerClient:
             return True
         raise RuntimeError(f"removeMeasurement failed: {raw[:300]}")
 
-    @staticmethod
-    def _parse_recent_biometrics(raw: str) -> list[dict]:
+    def _parse_recent_biometrics(self, raw: str) -> list[dict]:
         """Parse getRecentBiometrics GWT response.
 
         Returns list of biometric entries with id, metric_id, value, date.
@@ -2231,3 +2291,283 @@ class CronometerClient:
             block_idx += 1
 
         return biometrics
+
+    # ── Diary operations ──────────────────────────────────────────────
+
+    def copy_day(self, src: date, dst: date) -> bool:
+        """Copy all diary entries from one date to another.
+
+        This is a server-side operation that copies ALL entries
+        (food, exercise, notes, biometrics) from src to dst. It is
+        additive — existing entries on dst are not removed.
+
+        Args:
+            src: Source date to copy from.
+            dst: Destination date to copy to.
+
+        Returns:
+            True on success.
+        """
+        self.authenticate()
+        body = (
+            GWT_COPY_DAY
+            .replace("{gwt_header}", self.gwt_header)
+            .replace("{nonce}", self.nonce or "")
+            .replace("{user_id}", self.user_id or "")
+            .replace("{src_day}", str(src.day))
+            .replace("{src_month}", str(src.month))
+            .replace("{src_year}", str(src.year))
+            .replace("{dst_day}", str(dst.day))
+            .replace("{dst_month}", str(dst.month))
+            .replace("{dst_year}", str(dst.year))
+        )
+        raw = self._gwt_post(body)
+        if not raw.startswith("//OK"):
+            raise RuntimeError(f"copyDay failed: {raw[:300]}")
+        return True
+
+    def set_day_complete(self, day: date, complete: bool = True) -> bool:
+        """Mark a diary day as complete or incomplete.
+
+        Args:
+            day: The date to mark.
+            complete: True to mark complete, False to mark incomplete.
+
+        Returns:
+            True on success.
+        """
+        self.authenticate()
+        body = (
+            GWT_SET_DAY_COMPLETE
+            .replace("{gwt_header}", self.gwt_header)
+            .replace("{nonce}", self.nonce or "")
+            .replace("{user_id}", self.user_id or "")
+            .replace("{day}", str(day.day))
+            .replace("{month}", str(day.month))
+            .replace("{year}", str(day.year))
+            .replace("{complete}", "1" if complete else "0")
+        )
+        raw = self._gwt_post(body)
+        if not raw.startswith("//OK"):
+            raise RuntimeError(f"setDayComplete failed: {raw[:300]}")
+        return True
+
+    # ── Repeat item methods ───────────────────────────────────────────
+
+    def get_repeated_items(self) -> list[dict]:
+        """Get all recurring food entries.
+
+        Returns:
+            List of repeat item dicts with keys: repeat_item_id,
+            food_name, food_source_id, measure_id, quantity,
+            diary_group, days_of_week.
+        """
+        self.authenticate()
+        body = (
+            GWT_GET_REPEATED_ITEMS
+            .replace("{gwt_header}", self.gwt_header)
+            .replace("{nonce}", self.nonce or "")
+            .replace("{user_id}", self.user_id or "")
+        )
+        raw = self._gwt_post(body)
+        return self._parse_repeated_items(raw)
+
+    def add_repeat_item(
+        self,
+        food_source_id: int,
+        measure_id: int,
+        quantity: float,
+        food_name: str,
+        diary_group: int = 1,
+        days_of_week: list[int] | None = None,
+    ) -> bool:
+        """Add a recurring food entry.
+
+        Args:
+            food_source_id: Food source ID from search_foods.
+            measure_id: Measure/unit ID. Use UNIVERSAL_MEASURE_ID with
+                        quantity=weight_grams for reliable results.
+            quantity: Serving quantity (or weight_grams if using universal measure).
+            food_name: Display name for the food.
+            diary_group: Meal slot — 1=Breakfast, 2=Lunch, 3=Dinner, 4=Snacks.
+            days_of_week: List of days (0=Sun, 1=Mon, ..., 6=Sat).
+                          Defaults to all 7 days.
+
+        Returns:
+            True on success.
+        """
+        self.authenticate()
+
+        if days_of_week is None:
+            days_of_week = [0, 1, 2, 3, 4, 5, 6]
+
+        # Build day entries: "10|{day}|" for each day
+        day_entries = "".join(f"10|{d}|" for d in days_of_week)
+
+        # Format quantity
+        qty_str = str(int(quantity)) if quantity == int(quantity) else str(quantity)
+
+        body = (
+            GWT_ADD_REPEAT_ITEM
+            .replace("{gwt_header}", self.gwt_header)
+            .replace("{nonce}", self.nonce or "")
+            .replace("{user_id}", self.user_id or "")
+            .replace("{food_name}", food_name)
+            .replace("{diary_group}", str(diary_group))
+            .replace("{day_count}", str(len(days_of_week)))
+            .replace("{day_entries}", day_entries)
+            .replace("{quantity}", qty_str)
+            .replace("{measure_id}", str(measure_id))
+            .replace("{food_source_id}", str(food_source_id))
+        )
+        raw = self._gwt_post(body)
+        if not raw.startswith("//OK"):
+            raise RuntimeError(f"addRepeatItem failed: {raw[:300]}")
+        return True
+
+    def delete_repeat_item(self, repeat_item_id: int) -> bool:
+        """Delete a recurring food entry.
+
+        Args:
+            repeat_item_id: The ID of the repeat item to delete.
+
+        Returns:
+            True on success.
+        """
+        self.authenticate()
+        body = (
+            GWT_DELETE_REPEAT_ITEM
+            .replace("{gwt_header}", self.gwt_header)
+            .replace("{nonce}", self.nonce or "")
+            .replace("{user_id}", self.user_id or "")
+            .replace("{repeat_item_id}", str(repeat_item_id))
+        )
+        raw = self._gwt_post(body)
+        if not raw.startswith("//OK"):
+            raise RuntimeError(f"deleteRepeatItem failed: {raw[:300]}")
+        return True
+
+    @staticmethod
+    def _parse_repeated_items(raw: str) -> list[dict]:
+        """Parse a GWT-RPC getRepeatedItems response.
+
+        Response format example (1 item):
+        //OK[0,1055762,461776,658384,1,4,0,1,3,1,1,3.0,2,1,1,
+          ["java.util.ArrayList/...",
+           "com.cronometer.shared.repeatitems.RepeatItem/477684891",
+           "java.lang.Integer/3438268394",
+           "Wasa, Crispbread, Multi Grain"],0,7]
+
+        The string table has: ArrayList, RepeatItem, Integer, and food names.
+        Data section has interleaved values for each RepeatItem.
+        """
+        if not raw.startswith("//OK"):
+            return []
+
+        # Extract string table
+        closing = ",0,7]"
+        st_close = len(raw) - len(closing) - 1
+        depth, pos, in_str = 1, st_close - 1, False
+        while pos >= 0 and depth > 0:
+            ch = raw[pos]
+            if ch == '"' and (pos == 0 or raw[pos - 1] != "\\"):
+                in_str = not in_str
+            elif not in_str:
+                if ch == "]":
+                    depth += 1
+                elif ch == "[":
+                    depth -= 1
+            pos -= 1
+        st_open = pos + 1
+        string_table = json.loads(raw[st_open:st_close + 1])
+
+        # Extract data tokens before string table
+        data_section = raw[5:st_open].rstrip(",")
+        if not data_section:
+            return []
+
+        tokens: list = []
+        for part in data_section.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if part.startswith('"') and part.endswith('"'):
+                tokens.append(part.strip('"'))
+                continue
+            try:
+                tokens.append(float(part) if "." in part else int(part))
+            except ValueError:
+                tokens.append(None)
+
+        # Find food names in string table (not type references)
+        type_prefixes = ("java.", "com.cronometer.")
+        food_names = [
+            s for s in string_table
+            if not any(s.startswith(p) for p in type_prefixes)
+        ]
+
+        # Find the RepeatItem type index
+        repeat_type_idx = None
+        for i, s in enumerate(string_table):
+            if "RepeatItem/" in s:
+                repeat_type_idx = i + 1
+                break
+
+        if repeat_type_idx is None:
+            return []
+
+        # Count items: look for the item count in the data
+        # The response starts with type refs then item data
+        # Find float values (quantities) to determine item count
+        float_tokens = [t for t in tokens if isinstance(t, float)]
+        item_count = len(float_tokens)  # each item has exactly one float (quantity)
+
+        if item_count == 0:
+            return []
+
+        items = []
+        # Parse items from the token stream
+        # Key pattern: large ints are food_source_id, measure_id, repeat_item_id
+        # Small ints include day counts, day-of-week values, diary group
+        # The float is the quantity
+
+        # Simple heuristic: split tokens into blocks per item
+        # Each item has: food_source_id, measure_id, repeat_item_id,
+        # day info, quantity, and references to food name
+
+        # Find positions of float values to split blocks
+        float_positions = [i for i, t in enumerate(tokens) if isinstance(t, float)]
+
+        for item_idx, fpos in enumerate(float_positions):
+            item = {
+                "repeat_item_id": 0,
+                "food_name": food_names[item_idx] if item_idx < len(food_names) else "",
+                "food_source_id": 0,
+                "measure_id": 0,
+                "quantity": tokens[fpos],
+                "diary_group": 0,
+                "days_of_week": [],
+            }
+
+            # Look backwards from the float to find large ints
+            # (food_source_id, measure_id, repeat_item_id)
+            large_ints = []
+            start = float_positions[item_idx - 1] + 1 if item_idx > 0 else 0
+            block = tokens[start:fpos]
+
+            for t in block:
+                if isinstance(t, int) and t > 10000:
+                    large_ints.append(t)
+
+            # Typical order: food_source_id, measure_id, repeat_item_id
+            if len(large_ints) >= 3:
+                item["food_source_id"] = large_ints[0]
+                item["measure_id"] = large_ints[1]
+                item["repeat_item_id"] = large_ints[2]
+            elif len(large_ints) == 2:
+                item["food_source_id"] = large_ints[0]
+                item["measure_id"] = large_ints[1]
+
+            items.append(item)
+
+        return items

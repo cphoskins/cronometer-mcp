@@ -975,6 +975,169 @@ def sync_cronometer(
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
+@mcp.tool()
+def copy_day(source_date: str, destination_date: str) -> str:
+    """Copy all diary entries from one date to another.
+
+    Server-side operation that copies ALL entries (food, exercise,
+    notes, biometrics) from source to destination. Additive — does
+    not remove existing entries on the destination date.
+
+    Args:
+        source_date: Date to copy FROM as YYYY-MM-DD.
+        destination_date: Date to copy TO as YYYY-MM-DD.
+    """
+    try:
+        from datetime import date as date_type
+        src = date_type.fromisoformat(source_date)
+        dst = date_type.fromisoformat(destination_date)
+        client = _get_client()
+        client.copy_day(src, dst)
+        return json.dumps({
+            "status": "success",
+            "message": f"Copied all entries from {source_date} to {destination_date}.",
+            "source_date": source_date,
+            "destination_date": destination_date,
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
+@mcp.tool()
+def set_day_complete(date: str, complete: bool = True) -> str:
+    """Mark a diary day as complete or incomplete.
+
+    Args:
+        date: Date to mark as YYYY-MM-DD.
+        complete: True to mark complete, False to mark incomplete.
+    """
+    try:
+        from datetime import date as date_type
+        day = date_type.fromisoformat(date)
+        client = _get_client()
+        client.set_day_complete(day, complete)
+        status = "complete" if complete else "incomplete"
+        return json.dumps({
+            "status": "success",
+            "message": f"Marked {date} as {status}.",
+            "date": date,
+            "complete": complete,
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
+@mcp.tool()
+def get_repeated_items() -> str:
+    """List all recurring food entries.
+
+    Returns all repeat items configured in Cronometer, including
+    their food name, quantity, measure, diary group, and which
+    days of the week they repeat on.
+    """
+    try:
+        client = _get_client()
+        items = client.get_repeated_items()
+        return json.dumps({
+            "status": "success",
+            "count": len(items),
+            "items": items,
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
+@mcp.tool()
+def add_repeat_item(
+    food_source_id: int,
+    measure_id: int,
+    quantity: float,
+    food_name: str,
+    diary_group: str = "Breakfast",
+    days_of_week: str = "all",
+) -> str:
+    """Add a recurring food entry that auto-logs on selected days.
+
+    Args:
+        food_source_id: Food source ID from search_foods.
+        measure_id: Measure/unit ID. Use 0 for universal gram-based measure.
+        quantity: Serving quantity (or weight_grams if using universal measure).
+        food_name: Display name for the food.
+        diary_group: Meal slot — "Breakfast", "Lunch", "Dinner", or "Snacks".
+        days_of_week: Comma-separated day numbers (0=Sun, 1=Mon, ..., 6=Sat),
+                      or "all" for every day (default), or "weekdays", or "weekends".
+    """
+    try:
+        group_key = diary_group.strip().lower()
+        group_int = _DIARY_GROUP_MAP.get(group_key)
+        if group_int is None:
+            return json.dumps({
+                "status": "error",
+                "message": (
+                    f"Invalid diary_group '{diary_group}'. "
+                    "Must be one of: Breakfast, Lunch, Dinner, Snacks."
+                ),
+            })
+
+        if measure_id == 0:
+            from .client import UNIVERSAL_MEASURE_ID
+            measure_id = UNIVERSAL_MEASURE_ID
+
+        # Parse days_of_week
+        days_str = days_of_week.strip().lower()
+        if days_str == "all":
+            days = [0, 1, 2, 3, 4, 5, 6]
+        elif days_str == "weekdays":
+            days = [1, 2, 3, 4, 5]
+        elif days_str == "weekends":
+            days = [0, 6]
+        else:
+            days = [int(d.strip()) for d in days_of_week.split(",")]
+
+        client = _get_client()
+        client.add_repeat_item(
+            food_source_id=food_source_id,
+            measure_id=measure_id,
+            quantity=quantity,
+            food_name=food_name,
+            diary_group=group_int,
+            days_of_week=days,
+        )
+        day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        day_labels = [day_names[d] for d in days]
+        return json.dumps({
+            "status": "success",
+            "message": f"Added '{food_name}' as recurring entry.",
+            "food_name": food_name,
+            "diary_group": diary_group,
+            "days": day_labels,
+            "quantity": quantity,
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
+@mcp.tool()
+def delete_repeat_item(repeat_item_id: int) -> str:
+    """Delete a recurring food entry.
+
+    Use get_repeated_items to find the repeat_item_id.
+
+    Args:
+        repeat_item_id: The ID of the repeat item to delete.
+    """
+    try:
+        client = _get_client()
+        client.delete_repeat_item(repeat_item_id)
+        return json.dumps({
+            "status": "success",
+            "message": f"Deleted repeat item {repeat_item_id}.",
+            "repeat_item_id": repeat_item_id,
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
+
+
 def main():
     mcp.run(transport="stdio")
 
