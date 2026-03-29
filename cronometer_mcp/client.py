@@ -555,11 +555,23 @@ class CronometerClient:
         self._authenticated = True
         self._save_session()
 
+    def _reauthenticate(self) -> None:
+        """Force a full re-authentication, discarding cached session state."""
+        logger.info("Session expired, re-authenticating...")
+        self._authenticated = False
+        self.nonce = None
+        self.user_id = None
+        self.session.cookies.clear()
+        self._cookie_path.unlink(missing_ok=True)
+        self.authenticate()
+
     def export_raw(
         self,
         export_type: str,
         start: date | None = None,
         end: date | None = None,
+        *,
+        _retried: bool = False,
     ) -> str:
         """Export raw CSV data from Cronometer.
 
@@ -596,6 +608,9 @@ class CronometerClient:
                 "sec-fetch-site": "same-origin",
             },
         )
+        if resp.status_code == 403 and not _retried:
+            self._reauthenticate()
+            return self.export_raw(export_type, start, end, _retried=True)
         resp.raise_for_status()
         return resp.text
 
@@ -620,10 +635,12 @@ class CronometerClient:
         reader = csv.DictReader(io.StringIO(raw))
         return list(reader)
 
-    def _gwt_post(self, body: str) -> str:
+    def _gwt_post(self, body: str, *, _retried: bool = False) -> str:
         """POST a GWT-RPC payload and return the raw response text.
 
         Raises RuntimeError if the response does not start with '//OK'.
+        On ``NotLoggedInException`` the session is transparently
+        re-authenticated and the request is retried once.
         """
         resp = self.session.post(
             GWT_BASE_URL,
@@ -636,6 +653,9 @@ class CronometerClient:
         )
         resp.raise_for_status()
         if not resp.text.startswith("//OK"):
+            if "NotLoggedInException" in resp.text and not _retried:
+                self._reauthenticate()
+                return self._gwt_post(body, _retried=True)
             raise RuntimeError(
                 f"GWT-RPC call failed. Response: {resp.text[:300]}"
             )

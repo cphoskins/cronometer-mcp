@@ -1639,3 +1639,79 @@ class TestDeleteRepeatItem:
         )
         with pytest.raises(RuntimeError, match="GWT-RPC call failed"):
             c.delete_repeat_item(999999)
+
+
+# ---------------------------------------------------------------------------
+# Session re-authentication tests
+# ---------------------------------------------------------------------------
+
+class TestSessionReauth:
+    """Tests for automatic re-authentication on expired sessions."""
+
+    def _make_client(self):
+        c = CronometerClient(username="u@test.com", password="pw")
+        c._authenticated = True
+        c.nonce = "old-nonce"
+        c.user_id = "old-uid"
+        c.gwt_header = "DEADBEEF" * 4
+        return c
+
+    def test_gwt_post_reauths_on_not_logged_in(self):
+        c = self._make_client()
+        fail_resp = MagicMock(
+            text='//EX[com.cronometer.shared.user.NotLoggedInException/123]',
+            raise_for_status=lambda: None,
+        )
+        ok_resp = MagicMock(
+            text='//OK[data,0,7]',
+            raise_for_status=lambda: None,
+        )
+        c.session.post = MagicMock(side_effect=[fail_resp, ok_resp])
+        with patch.object(c, "_reauthenticate") as m:
+            result = c._gwt_post("body")
+        m.assert_called_once()
+        assert result == '//OK[data,0,7]'
+
+    def test_export_raw_reauths_on_403(self):
+        c = self._make_client()
+        forbidden = MagicMock(status_code=403, raise_for_status=MagicMock(side_effect=Exception))
+        ok = MagicMock(status_code=200, text="csv-data", raise_for_status=lambda: None)
+        c.session.get = MagicMock(side_effect=[forbidden, ok])
+        with patch.object(c, "_reauthenticate"), \
+             patch.object(c, "_generate_auth_token", return_value="fake-token"):
+            result = c.export_raw("servings")
+        assert result == "csv-data"
+
+    def test_reauth_failure_propagates(self):
+        c = self._make_client()
+        fail_resp = MagicMock(
+            text='//EX[com.cronometer.shared.user.NotLoggedInException/123]',
+            raise_for_status=lambda: None,
+        )
+        c.session.post = MagicMock(return_value=fail_resp)
+        with patch.object(c, "_reauthenticate"):
+            with pytest.raises(RuntimeError, match="GWT-RPC call failed"):
+                c._gwt_post("body")
+
+    def test_no_infinite_retry(self):
+        c = self._make_client()
+        fail_resp = MagicMock(
+            text='//EX[com.cronometer.shared.user.NotLoggedInException/123]',
+            raise_for_status=lambda: None,
+        )
+        c.session.post = MagicMock(return_value=fail_resp)
+        with patch.object(c, "_reauthenticate"):
+            with pytest.raises(RuntimeError):
+                c._gwt_post("body")
+        # _gwt_post called twice (original + one retry), not more
+        assert c.session.post.call_count == 2
+
+    def test_reauthenticate_clears_state(self):
+        c = self._make_client()
+        with patch.object(c, "authenticate") as m_auth:
+            c._cookie_path = MagicMock()
+            c._reauthenticate()
+        assert c._authenticated is False
+        assert c.nonce is None
+        assert c.user_id is None
+        m_auth.assert_called_once()
