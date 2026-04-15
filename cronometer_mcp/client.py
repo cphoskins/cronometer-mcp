@@ -15,6 +15,7 @@ import logging
 import os
 import pickle
 import re
+import time
 from datetime import date
 from pathlib import Path
 
@@ -40,8 +41,8 @@ UNIVERSAL_MEASURE_ID = 124399
 # GWT magic values — used as fallbacks if auto-discovery fails.
 DEFAULT_GWT_CONTENT_TYPE = "text/x-gwt-rpc; charset=UTF-8"
 DEFAULT_GWT_MODULE_BASE = "https://cronometer.com/cronometer/"
-DEFAULT_GWT_PERMUTATION = "CBC38FBB0A1527BD5E68722DD9DABD27"
-DEFAULT_GWT_HEADER = "76FC4464E20E53D16663AC9A96A486B3"
+DEFAULT_GWT_PERMUTATION = "8991EC9262AAC4288DD509AA25E804F1"
+DEFAULT_GWT_HEADER = "F074E4C7D41D83A4BC27CA0816B7B731"
 
 GWT_AUTHENTICATE = (
     "7|0|5|https://cronometer.com/cronometer/|"
@@ -496,6 +497,12 @@ class CronometerClient:
         )
         resp.raise_for_status()
 
+        # GWT exception responses start with //EX — treat as auth failure
+        if resp.text.startswith("//EX"):
+            raise RuntimeError(
+                f"GWT returned exception (session likely expired). Response: {resp.text[:200]}"
+            )
+
         match = re.search(r'"([^"]+)"', resp.text)
         if not match:
             raise RuntimeError(
@@ -504,6 +511,9 @@ class CronometerClient:
         token = match.group(1)
         logger.info("Auth token generated")
         return token
+
+    # Sessions older than this are proactively discarded without a network call.
+    _SESSION_TTL_SECONDS = 20 * 3600  # 20 hours
 
     def _save_session(self) -> None:
         """Persist session cookies and auth state to disk."""
@@ -514,6 +524,7 @@ class CronometerClient:
             "user_id": self.user_id,
             "gwt_permutation": self.gwt_permutation,
             "gwt_header": self.gwt_header,
+            "saved_at": time.time(),
         }
         self._cookie_path.write_bytes(pickle.dumps(data))
         logger.debug("Session saved to %s", self._cookie_path)
@@ -524,6 +535,12 @@ class CronometerClient:
             return False
         try:
             data = pickle.loads(self._cookie_path.read_bytes())
+            saved_at = data.get("saved_at", 0)
+            age = time.time() - saved_at
+            if age > self._SESSION_TTL_SECONDS:
+                logger.info("Cached session is %.0fh old; re-authenticating", age / 3600)
+                self._cookie_path.unlink(missing_ok=True)
+                return False
             for k, v in data["cookies"].items():
                 self.session.cookies.set(k, v)
             self.nonce = data["nonce"]
@@ -534,7 +551,7 @@ class CronometerClient:
             self._discover_gwt_hashes()
             token = self._generate_auth_token()
             if token:
-                logger.info("Restored saved session")
+                logger.info("Restored saved session (age %.0fh)", age / 3600)
                 return True
         except Exception:
             pass
