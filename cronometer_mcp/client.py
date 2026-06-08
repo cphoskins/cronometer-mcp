@@ -27,6 +27,11 @@ LOGIN_HTML_URL = "https://cronometer.com/login/"
 LOGIN_API_URL = "https://cronometer.com/login"
 GWT_BASE_URL = "https://cronometer.com/cronometer/app"
 EXPORT_URL = "https://cronometer.com/export"
+# Food search migrated off GWT-RPC to a plain REST/JSON endpoint. The old
+# findFoods GWT method was removed server-side (it now returns an
+# IncompatibleRemoteServiceException "application is out of date"); the web
+# app calls this URL instead. {user_id} is the authenticated Cronometer user.
+FOOD_SEARCH_URL = "https://cronometer.com/api/v3/user/{user_id}/food-search/string"
 GWT_NOCACHE_JS_URL = "https://cronometer.com/cronometer/cronometer.nocache.js"
 GWT_CACHE_JS_URL = "https://cronometer.com/cronometer/{permutation}.cache.js"
 
@@ -58,18 +63,6 @@ GWT_GENERATE_AUTH_TOKEN = (
     "generateAuthorizationToken|java.lang.String/2004016611|"
     "I|com.cronometer.shared.user.AuthScope/2065601159|"
     "{nonce}|1|2|3|4|4|5|6|6|7|8|{user_id}|3600|7|2|"
-)
-
-GWT_FIND_FOODS = (
-    "7|0|12|https://cronometer.com/cronometer/|"
-    "{gwt_header}|"
-    "com.cronometer.shared.rpc.CronometerService|"
-    "findFoods|java.lang.String/2004016611|"
-    "I|[Lcom.cronometer.shared.foods.FoodSource;/3597302983|"
-    "com.cronometer.shared.foods.FoodSearchTabSelection/1776179901|"
-    "Z|{nonce}|{query}|"
-    "com.cronometer.shared.foods.FoodSource/4236433762|"
-    "1|2|3|4|8|5|5|6|7|6|5|8|9|10|11|{max_results}|7|1|12|0|0|0|8|0|0|"
 )
 
 GWT_UPDATE_DIARY = (
@@ -642,179 +635,62 @@ class CronometerClient:
         return resp.text
 
     @staticmethod
-    def _parse_find_foods(raw: str) -> list[dict]:
-        """Parse a GWT-RPC findFoods response into structured food records.
+    def _parse_food_search(items: list) -> list[dict]:
+        """Parse a REST food-search JSON response into structured records.
 
-        The GWT-RPC wire format encodes all strings in a string table at the
-        end of the response; the data section contains integer tokens that
-        reference that table by 1-based index.  Each SearchHit occupies a
-        fixed-width slot in the token stream:
+        The ``/api/v3/user/{id}/food-search/string`` endpoint returns a JSON
+        array of food objects.  Each object's fields map onto the keys this
+        client has always exposed (preserving backward compatibility with the
+        previous GWT-RPC ``findFoods`` parser) as follows:
 
-            score, flags, name_ref, food_id, measure_desc_ref, locale_ref,
-            food_source_id, popularity, keywords_ref, <SearchHit type ref>
+            JSON ``id``                 -> ``food_source_id``
+            JSON ``measureId``          -> ``food_id``
+            JSON ``name``               -> ``name``
+            JSON ``measureDisplayName`` -> ``measure_desc``
+            JSON ``score``              -> ``score``
 
-        We locate every occurrence of the SearchHit type-index value in the
-        token list and read the nine tokens that precede it.
+        These two ids feed straight into :meth:`get_food` (food_source_id) and
+        :meth:`add_serving` (food_id + food_source_id), exactly as before. The
+        REST endpoint returns one row per food (its default measure) rather
+        than one row per measure; use :meth:`get_food` for other measures.
 
         Args:
-            raw: Raw ``//OK[...]`` GWT-RPC response string.
+            items: Decoded JSON (expected to be a list of dicts).
 
         Returns:
             List of dicts with keys ``food_id``, ``food_source_id``, ``name``,
-            ``measure_desc``, and ``score``.  Returns an empty list when the
-            response contains no results or cannot be parsed.
-
-        Raises:
-            ValueError: If the response does not match the expected GWT-RPC
-                        envelope format.
-
-        Example::
-
-            results = CronometerClient._parse_find_foods(raw_gwt_response)
-            # [{"food_id": 1072102, "food_source_id": 464674,
-            #   "name": "Egg, whole, cooked, hard-boiled",
-            #   "measure_desc": "1 large - 50g", "score": 100}, ...]
+            ``measure_desc``, and ``score``.  Returns an empty list for an
+            empty or unexpected payload.
         """
-        raw = raw.strip()
-        if not raw.startswith("//OK["):
-            raise ValueError(
-                f"Unexpected GWT-RPC response format: {raw[:100]!r}"
-            )
-
-        # The response ends with ],0,7] — the ']' closes the embedded string
-        # table array, then ',0,7]' closes the outer //OK[ envelope.
-        closing = ",0,7]"
-        if not raw.endswith(closing):
-            raise ValueError(
-                f"Response does not end with expected closing ',0,7]': "
-                f"{raw[-40:]!r}"
-            )
-
-        # Locate the string table JSON array by scanning backwards from the
-        # ']' that closes it (immediately before ',0,7]').
-        # Must skip brackets inside quoted strings (e.g. Java array type
-        # descriptors like "[Lcom.cronometer...").
-        st_close = len(raw) - len(closing) - 1  # index of ']' closing str table
-        depth = 1
-        pos = st_close - 1
-        in_string = False
-        while pos >= 0 and depth > 0:
-            ch = raw[pos]
-            if ch == '"' and (pos == 0 or raw[pos - 1] != "\\"):
-                in_string = not in_string
-            elif not in_string:
-                if ch == "]":
-                    depth += 1
-                elif ch == "[":
-                    depth -= 1
-            pos -= 1
-        st_open = pos + 1  # index of '[' opening the string table
-
-        string_table: list[str] = json.loads(raw[st_open : st_close + 1])
-
-        # Find the 1-based indices of key classes in the string table.
-        searchhit_type_idx: int | None = None
-        foodsource_type_idx: int | None = None
-        foodtype_type_idx: int | None = None
-        for idx, entry in enumerate(string_table):
-            # Skip Java array type descriptors (e.g. "[Lcom.cronometer...;/...")
-            # — we only want the actual class, not the array-of-class type.
-            if entry.startswith("["):
-                continue
-            if "SearchHit" in entry and searchhit_type_idx is None:
-                searchhit_type_idx = idx + 1  # GWT uses 1-based references
-            elif "FoodSource" in entry and foodsource_type_idx is None:
-                foodsource_type_idx = idx + 1
-            elif "FoodType" in entry and foodtype_type_idx is None:
-                foodtype_type_idx = idx + 1
-
-        if searchhit_type_idx is None:
-            # No SearchHit class in the string table → zero results.
+        if not isinstance(items, list):
             return []
 
-        # Helper: resolve a 1-based string table reference to its string value.
-        def _resolve(ref: int) -> str | None:
-            if 1 <= ref <= len(string_table):
-                return string_table[ref - 1]
-            return None
-
-        # Tokenise the data section (between '//OK[' and the string table).
-        # All tokens in a findFoods data section are plain integers.
-        # '//OK[' is 5 characters, so data starts at index 5.
-        data_section = raw[5:st_open].rstrip(",")
-        if not data_section:
-            return []
-
-        tokens: list[int] = []
-        for part in data_section.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            try:
-                tokens.append(int(part))
-            except ValueError:
-                # Unexpected non-integer token; insert a sentinel that will
-                # never match a valid type index so scanning continues safely.
-                tokens.append(-(10 ** 9))
-
-        # Scan for SearchHit type-index occurrences.
-        # Each hit has exactly 9 fields before the type ref:
-        #
-        #   i-9  score          (relevance, e.g. 1918)
-        #   i-8  flags          (always 0)
-        #   i-7  name_ref       (1-based string table index)
-        #   i-6  food_id        (raw integer, e.g. 1072101)
-        #   i-5  measure_desc_ref (1-based string table index)
-        #   i-4  locale_ref     (1-based string table index, e.g. → "en")
-        #   i-3  food_source_id (raw integer, e.g. 464674)
-        #   i-2  popularity     (usage count, not returned to caller)
-        #   i-1  keywords_ref   (1-based string table index, not returned)
-        #   i    <SearchHit type ref>
-        #
-        # FoodSource/FoodType enum data appears in separate token blocks
-        # between SearchHit records, NOT immediately after the type ref.
         results: list[dict] = []
-        for i, token in enumerate(tokens):
-            if token != searchhit_type_idx:
+        for item in items:
+            if not isinstance(item, dict):
                 continue
-            if i < 9:
+            food_source_id = item.get("id")
+            food_id = item.get("measureId")
+            if food_source_id is None or food_id is None:
                 continue
-
-            score = tokens[i - 9]
-            # tokens[i - 8] is flags (always 0; not validated here)
-            name_ref = tokens[i - 7]
-            food_id = tokens[i - 6]
-            measure_desc_ref = tokens[i - 5]
-            # tokens[i - 4] is locale_ref (not returned)
-            food_source_id = tokens[i - 3]
-            # tokens[i - 2] is popularity (not returned)
-            # tokens[i - 1] is keywords_ref (not returned)
-
-            name = _resolve(name_ref)
-            if name is None:
-                continue
-            # Skip refs that resolve to GWT class descriptors (e.g.
-            # "com.cronometer...", "java.util...", "[Lcom...") — indicates a
-            # false positive where a stray integer matched the type index.
-            if "/" in name and ("." in name.split("/")[0]):
-                continue
-
-            measure_desc = _resolve(measure_desc_ref) or ""
-
             results.append(
                 {
                     "food_id": food_id,
                     "food_source_id": food_source_id,
-                    "name": name,
-                    "measure_desc": measure_desc,
-                    "score": score,
+                    "name": item.get("name") or item.get("displayString") or "",
+                    "measure_desc": item.get("measureDisplayName", ""),
+                    "score": item.get("score", 0),
                 }
             )
-
         return results
 
     def find_foods(self, query: str, max_results: int = 50) -> list[dict]:
         """Search Cronometer's food database.
+
+        Uses the REST ``food-search`` endpoint that the web app migrated to.
+        Cronometer removed the legacy GWT-RPC ``findFoods`` method server-side;
+        it now returns an ``IncompatibleRemoteServiceException`` ("this
+        application is out of date").
 
         Args:
             query: Search term.  The Cronometer web app uppercases queries
@@ -824,23 +700,46 @@ class CronometerClient:
         Returns:
             List of dicts, each with keys:
 
-            - ``food_id`` (int): Numeric food identifier.
-            - ``food_source_id`` (int): Source database identifier (e.g. USDA).
+            - ``food_id`` (int): Numeric food identifier (the food's default
+              measure id) needed by :meth:`add_serving`.
+            - ``food_source_id`` (int): Source database identifier (e.g. USDA),
+              needed by :meth:`get_food` and :meth:`add_serving`.
             - ``name`` (str): Food name as stored in Cronometer.
             - ``measure_desc`` (str): Default measure description
               (e.g. ``"1 large - 50g"``).
             - ``score`` (int): Relevance score from the search engine.
         """
-        self.authenticate()
-        body = (
-            GWT_FIND_FOODS
-            .replace("{gwt_header}", self.gwt_header)
-            .replace("{nonce}", self.nonce or "")
-            .replace("{query}", query.upper())
-            .replace("{max_results}", str(max_results))
-        )
-        raw = self._gwt_post(body)
-        return self._parse_find_foods(raw)
+        def _attempt() -> list:
+            self.authenticate()
+            resp = self.session.get(
+                FOOD_SEARCH_URL.format(user_id=self.user_id),
+                params={
+                    "query": query.upper(),
+                    "maxResults": max_results,
+                    "sources": "All",
+                    "categoryId": 0,
+                    "selectedTab": "ALL",
+                    "type": "All",
+                },
+                headers={"X-CRONO-USE-OPEN-SEARCH": "false"},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        try:
+            items = _attempt()
+        except requests.HTTPError as e:
+            # A rejected session shows up as 401/403 here; discard the cached
+            # auth state, log in fresh, and retry once.
+            status = e.response.status_code if e.response is not None else None
+            if status not in (401, 403):
+                raise
+            self._authenticated = False
+            self.session.cookies.clear()
+            self._cookie_path.unlink(missing_ok=True)
+            items = _attempt()
+
+        return self._parse_food_search(items)
 
     def get_food(self, food_source_id: int) -> dict:
         """Get detailed food information including available measures.
