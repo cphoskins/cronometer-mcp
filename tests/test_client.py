@@ -4,6 +4,8 @@ import pytest
 from unittest.mock import patch, MagicMock
 from datetime import date
 
+import requests
+
 from cronometer_mcp.client import CronometerClient, EXPORT_TYPES, UNIVERSAL_MEASURE_ID
 
 
@@ -176,444 +178,175 @@ class TestExports:
 
 
 # ---------------------------------------------------------------------------
-# Helper to build synthetic GWT-RPC findFoods responses for unit tests.
+# REST food-search parsing + find_foods integration.
 # ---------------------------------------------------------------------------
 
-def _build_find_foods_response(foods: list[dict]) -> str:
-    """Build a minimal //OK[...] findFoods response from a list of food specs.
-
-    Each food spec dict must have:
-        name, measure_desc, food_id, food_source_id, score, keywords
-
-    The string table is populated with class names first, then data strings
-    deduplicated in insertion order.  Data tokens are assembled to match the
-    field layout documented in the GWT-RPC spec.
-    """
-    # Canonical class names that always appear in the string table.
-    class_names = [
-        "java.util.ArrayList/4159755760",
-        "com.cronometer.shared.foods.SearchHit/1606796888",
-        "com.cronometer.shared.foods.FoodSource/4236433762",
-        "com.cronometer.shared.foods.FoodType/3105214803",
-    ]
-
-    # Collect data strings in insertion order (locale always "en").
-    data_strings: list[str] = []
-
-    def _intern(s: str) -> int:
-        """Return 1-based string table index, inserting if absent."""
-        combined = class_names + data_strings
-        if s in combined:
-            return combined.index(s) + 1
-        data_strings.append(s)
-        return len(class_names) + len(data_strings)  # 1-based
-
-    # Pre-compute string table refs for each food.
-    food_refs = []
-    for food in foods:
-        locale_ref = _intern("en")
-        measure_ref = _intern(food["measure_desc"])
-        name_ref = _intern(food["name"])
-        kw_ref = _intern(food["keywords"])
-        food_refs.append(
-            {
-                "score": food["score"],
-                "name_ref": name_ref,
-                "food_id": food["food_id"],
-                "measure_ref": measure_ref,
-                "locale_ref": locale_ref,
-                "food_source_id": food["food_source_id"],
-                "popularity": food.get("popularity", 1000000),
-                "kw_ref": kw_ref,
-            }
-        )
-
-    string_table = class_names + data_strings
-    searchhit_type_idx = 2  # always index 2 in class_names
-
-    # Build data tokens.
-    # Header: <string_table_size>, 0, <ArrayList type ref=1>
-    data_tokens: list[int] = [len(string_table), 0, 1]
-    # Number of SearchHit items.
-    data_tokens.append(len(foods))
-
-    for refs in food_refs:
-        data_tokens += [
-            refs["score"],
-            0,                      # flags
-            refs["name_ref"],
-            refs["food_id"],
-            refs["measure_ref"],
-            refs["locale_ref"],
-            refs["food_source_id"],
-            refs["popularity"],
-            refs["kw_ref"],
-            searchhit_type_idx,     # SearchHit class ref
-            3,                      # FoodSource class ref
-            0,                      # FoodSource ordinal
-            4,                      # FoodType class ref
-            0,                      # FoodType ordinal
-        ]
-
-    import json as _json
-    st_json = _json.dumps(string_table)
-    tokens_str = ",".join(str(t) for t in data_tokens)
-    return f"//OK[{tokens_str},{st_json},0,7]"
+# A representative slice of the /api/v3/user/{id}/food-search/string payload.
+_FOOD_SEARCH_JSON = [
+    {
+        "name": "Eggs, Cooked",
+        "id": 464674,
+        "score": 915,
+        "source": "NCCDB",
+        "measureId": 1072101,
+        "measureDisplayName": "1 large - 50g",
+        "displayString": "Eggs, Cooked",
+        "retired": False,
+    },
+    {
+        "name": "Egg, Whole, Cooked, Scrambled",
+        "id": 1177,
+        "score": 1185,
+        "source": "USDA",
+        "measureId": 3575,
+        "measureDisplayName": "1 large - 61g",
+        "displayString": "Egg, Whole, Cooked, Scrambled",
+        "retired": False,
+    },
+]
 
 
-class TestParseFindFoods:
-    """Unit tests for CronometerClient._parse_find_foods (no network calls)."""
+class TestParseFoodSearch:
+    """Unit tests for CronometerClient._parse_food_search (no network calls)."""
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+    def _parse(self, items):
+        return CronometerClient._parse_food_search(items)
 
-    def _parse(self, raw: str) -> list[dict]:
-        return CronometerClient._parse_find_foods(raw)
-
-    # ------------------------------------------------------------------
-    # Happy path
-    # ------------------------------------------------------------------
-
-    def test_three_results_from_docstring_example(self):
-        """Validate the concrete 3-result 'EGGS COOKED' example from the spec."""
-        string_table = [
-            "java.util.ArrayList/4159755760",
-            "com.cronometer.shared.foods.SearchHit/1606796888",
-            "com.cronometer.shared.foods.FoodSource/4236433762",
-            "com.cronometer.shared.foods.FoodType/3105214803",
-            "en",
-            "1 large - 50g",
-            "Egg, whole, cooked, hard-boiled",
-            "egg whole cooked hard boiled",
-            "1 large - 50g",
-            "Egg, whole, cooked, scrambled",
-            "egg whole cooked scrambled",
-            "1 large (61g) - 91g",
-            "Egg, whole, cooked, omelet",
-            "egg whole cooked omelet",
-        ]
-        import json as _json
-        st_json = _json.dumps(string_table)
-
-        # Data tokens assembled manually per spec:
-        # header: 14, 0, 7 (ArrayList type=7? — using 1 per helper convention,
-        # but for this test we replicate the raw example numbers exactly)
-        # SearchHit 1: score=100,flags=0,name_ref=7,food_id=1072102,
-        #              measure_ref=6,locale_ref=5,src_id=464674,
-        #              pop=1010000,kw_ref=8,type=2, then 3,0,4,0
-        # SearchHit 2: score=100,...,type=2, then -3,0,-1,0
-        # SearchHit 3: score=100,...,type=2, then -7,0,-5,0
-        data_tokens = (
-            "14,0,7,3,"
-            "100,0,7,1072102,6,5,464674,1010000,8,2,3,0,4,0,"
-            "100,0,10,1072101,9,5,464674,1009000,11,2,-3,0,-1,0,"
-            "100,0,13,1072100,12,5,464674,1006000,14,2,-7,0,-5,0"
-        )
-        raw = f"//OK[{data_tokens},{st_json},0,7]"
-
-        results = self._parse(raw)
-
-        assert len(results) == 3
-
+    def test_maps_fields_backward_compatibly(self):
+        results = self._parse(_FOOD_SEARCH_JSON)
+        assert len(results) == 2
+        # JSON id -> food_source_id, JSON measureId -> food_id (the historical
+        # GWT-RPC mapping; these ids feed get_food/add_serving unchanged).
         assert results[0] == {
-            "food_id": 1072102,
-            "food_source_id": 464674,
-            "name": "Egg, whole, cooked, hard-boiled",
-            "measure_desc": "1 large - 50g",
-            "score": 100,
-        }
-        assert results[1] == {
             "food_id": 1072101,
             "food_source_id": 464674,
-            "name": "Egg, whole, cooked, scrambled",
+            "name": "Eggs, Cooked",
             "measure_desc": "1 large - 50g",
-            "score": 100,
+            "score": 915,
         }
-        assert results[2] == {
-            "food_id": 1072100,
-            "food_source_id": 464674,
-            "name": "Egg, whole, cooked, omelet",
-            "measure_desc": "1 large (61g) - 91g",
-            "score": 100,
-        }
-
-    def test_single_result(self):
-        raw = _build_find_foods_response(
-            [
-                {
-                    "name": "Chicken Breast",
-                    "measure_desc": "1 oz",
-                    "food_id": 999,
-                    "food_source_id": 111,
-                    "score": 95,
-                    "keywords": "chicken breast",
-                }
-            ]
-        )
-        results = self._parse(raw)
-        assert len(results) == 1
-        r = results[0]
-        assert r["food_id"] == 999
-        assert r["food_source_id"] == 111
-        assert r["name"] == "Chicken Breast"
-        assert r["measure_desc"] == "1 oz"
-        assert r["score"] == 95
-
-    def test_multiple_results_via_builder(self):
-        foods = [
-            {
-                "name": "Salmon, Atlantic, farmed",
-                "measure_desc": "3 oz",
-                "food_id": 10001,
-                "food_source_id": 4001,
-                "score": 100,
-                "keywords": "salmon atlantic farmed",
-            },
-            {
-                "name": "Salmon, Pacific, coho",
-                "measure_desc": "3 oz",
-                "food_id": 10002,
-                "food_source_id": 4001,
-                "score": 90,
-                "keywords": "salmon pacific coho",
-            },
-            {
-                "name": "Salmon, canned",
-                "measure_desc": "1 can - 418g",
-                "food_id": 10003,
-                "food_source_id": 4001,
-                "score": 80,
-                "keywords": "salmon canned",
-            },
-        ]
-        raw = _build_find_foods_response(foods)
-        results = self._parse(raw)
-
-        assert len(results) == 3
-        assert results[0]["name"] == "Salmon, Atlantic, farmed"
-        assert results[1]["name"] == "Salmon, Pacific, coho"
-        assert results[2]["name"] == "Salmon, canned"
-        assert results[0]["score"] == 100
-        assert results[1]["score"] == 90
-        assert results[2]["score"] == 80
+        assert results[1]["food_id"] == 3575
+        assert results[1]["food_source_id"] == 1177
 
     def test_returned_dict_keys(self):
-        raw = _build_find_foods_response(
-            [
-                {
-                    "name": "Tuna",
-                    "measure_desc": "1 can",
-                    "food_id": 42,
-                    "food_source_id": 7,
-                    "score": 88,
-                    "keywords": "tuna",
-                }
-            ]
-        )
-        result = self._parse(raw)[0]
-        assert set(result.keys()) == {
-            "food_id", "food_source_id", "name", "measure_desc", "score"
+        r = self._parse(_FOOD_SEARCH_JSON)[0]
+        assert set(r.keys()) == {
+            "food_id", "food_source_id", "name", "measure_desc", "score",
         }
 
-    def test_measure_desc_preserved(self):
-        raw = _build_find_foods_response(
-            [
-                {
-                    "name": "Eggs",
-                    "measure_desc": "1 large (61g)",
-                    "food_id": 1,
-                    "food_source_id": 2,
-                    "score": 100,
-                    "keywords": "eggs",
-                }
-            ]
-        )
-        assert self._parse(raw)[0]["measure_desc"] == "1 large (61g)"
+    def test_ids_are_integers(self):
+        r = self._parse(_FOOD_SEARCH_JSON)[0]
+        assert isinstance(r["food_id"], int)
+        assert isinstance(r["food_source_id"], int)
 
-    def test_food_id_and_source_are_integers(self):
-        raw = _build_find_foods_response(
-            [
-                {
-                    "name": "Spinach",
-                    "measure_desc": "1 cup",
-                    "food_id": 123456,
-                    "food_source_id": 654321,
-                    "score": 77,
-                    "keywords": "spinach",
-                }
-            ]
-        )
-        result = self._parse(raw)[0]
-        assert isinstance(result["food_id"], int)
-        assert isinstance(result["food_source_id"], int)
-        assert isinstance(result["score"], int)
-        assert result["food_id"] == 123456
-        assert result["food_source_id"] == 654321
+    def test_empty_list_returns_empty(self):
+        assert self._parse([]) == []
 
-    # ------------------------------------------------------------------
-    # Zero results
-    # ------------------------------------------------------------------
+    def test_non_list_returns_empty(self):
+        assert self._parse({"error": "nope"}) == []
+        assert self._parse(None) == []
 
-    def test_zero_results_returns_empty_list(self):
-        raw = _build_find_foods_response([])
-        results = self._parse(raw)
-        assert results == []
+    def test_falls_back_to_display_string_for_name(self):
+        items = [{"id": 1, "measureId": 2, "displayString": "Fallback Name"}]
+        assert self._parse(items)[0]["name"] == "Fallback Name"
 
-    def test_zero_results_no_searchhit_in_string_table(self):
-        """A string table with no SearchHit entry → empty list."""
-        import json as _json
-        st = ["java.util.ArrayList/4159755760", "some.other.Class/12345"]
-        raw = f'//OK[2,0,1,{_json.dumps(st)},0,7]'
-        assert self._parse(raw) == []
-
-    # ------------------------------------------------------------------
-    # Error handling
-    # ------------------------------------------------------------------
-
-    def test_raises_on_non_ok_prefix(self):
-        with pytest.raises(ValueError, match="Unexpected GWT-RPC"):
-            self._parse("//EX[some error]")
-
-    def test_raises_on_missing_closing_suffix(self):
-        with pytest.raises(ValueError, match="does not end with"):
-            self._parse('//OK[1,["x"],0,6]')  # wrong closing number
-
-    def test_raises_on_invalid_json_string_table(self):
-        # Corrupt the string table JSON.
-        raw = '//OK[1,[broken json,0,7]'
-        with pytest.raises(Exception):
-            self._parse(raw)
-
-    # ------------------------------------------------------------------
-    # Robustness / edge cases
-    # ------------------------------------------------------------------
-
-    def test_stray_type_ref_near_start_is_skipped(self):
-        """A SearchHit type index appearing before 9 tokens are available
-        must be silently skipped, not cause an IndexError."""
-        import json as _json
-        # Put the SearchHit type ref (2) as the very first data token.
-        st = [
-            "java.util.ArrayList/4159755760",
-            "com.cronometer.shared.foods.SearchHit/1606796888",
+    def test_skips_items_missing_ids(self):
+        items = [
+            {"name": "no measure", "id": 5},
+            {"name": "no source", "measureId": 6},
+            {"name": "ok", "id": 7, "measureId": 8},
         ]
-        raw = f'//OK[2,{_json.dumps(st)},0,7]'
-        # The token '2' at index 0 cannot look back 9 positions → skip it.
-        assert self._parse(raw) == []
-
-    def test_names_with_commas_and_special_chars(self):
-        """Food names containing commas, hyphens, and parentheses survive
-        the round-trip through the JSON string table correctly."""
-        foods = [
-            {
-                "name": "Beef, ground, 80% lean / 20% fat (patty)",
-                "measure_desc": "3 oz - 85g",
-                "food_id": 55555,
-                "food_source_id": 22222,
-                "score": 100,
-                "keywords": "beef ground 80 lean 20 fat patty",
-            }
-        ]
-        raw = _build_find_foods_response(foods)
-        result = self._parse(raw)[0]
-        assert result["name"] == "Beef, ground, 80% lean / 20% fat (patty)"
-        assert result["measure_desc"] == "3 oz - 85g"
-
-    def test_deduplication_of_shared_measure_desc(self):
-        """Two foods with the same measure_desc string share a single string
-        table entry; both must still parse correctly."""
-        foods = [
-            {
-                "name": "Apple",
-                "measure_desc": "1 medium",
-                "food_id": 1,
-                "food_source_id": 10,
-                "score": 100,
-                "keywords": "apple",
-            },
-            {
-                "name": "Pear",
-                "measure_desc": "1 medium",
-                "food_id": 2,
-                "food_source_id": 10,
-                "score": 90,
-                "keywords": "pear",
-            },
-        ]
-        raw = _build_find_foods_response(foods)
-        results = self._parse(raw)
-        assert len(results) == 2
-        assert results[0]["measure_desc"] == "1 medium"
-        assert results[1]["measure_desc"] == "1 medium"
-        assert results[0]["name"] == "Apple"
-        assert results[1]["name"] == "Pear"
+        results = self._parse(items)
+        assert len(results) == 1
+        assert results[0]["food_source_id"] == 7
+        assert results[0]["food_id"] == 8
 
 
 class TestFindFoodsIntegration:
-    """Tests for find_foods() — verifies it calls _parse_find_foods and returns
-    a list[dict] instead of a raw string."""
+    """Tests for find_foods() — verifies it calls the REST endpoint and parses
+    the JSON into a list[dict]."""
+
+    def _mock_response(self, json_payload, status=200):
+        resp = MagicMock()
+        resp.json.return_value = json_payload
+        if status >= 400:
+            err = requests.HTTPError(response=MagicMock(status_code=status))
+            resp.raise_for_status.side_effect = err
+        else:
+            resp.raise_for_status.return_value = None
+        return resp
 
     def test_find_foods_returns_list(self, client):
-        raw = _build_find_foods_response(
-            [
-                {
-                    "name": "Broccoli",
-                    "measure_desc": "1 cup",
-                    "food_id": 300,
-                    "food_source_id": 100,
-                    "score": 95,
-                    "keywords": "broccoli",
-                }
-            ]
-        )
         client._authenticated = True
-        client.nonce = "n"
         client.user_id = "42"
-        client.session.post = MagicMock(
-            return_value=MagicMock(
-                text=raw, raise_for_status=lambda: None
-            )
+        client.session.get = MagicMock(
+            return_value=self._mock_response(_FOOD_SEARCH_JSON)
         )
 
-        results = client.find_foods("broccoli")
+        results = client.find_foods("eggs")
 
         assert isinstance(results, list)
-        assert len(results) == 1
-        assert results[0]["name"] == "Broccoli"
-        assert results[0]["food_id"] == 300
+        assert len(results) == 2
+        assert results[0]["name"] == "Eggs, Cooked"
+        assert results[0]["food_source_id"] == 464674
+        assert results[0]["food_id"] == 1072101
 
     def test_find_foods_zero_results(self, client):
-        raw = _build_find_foods_response([])
         client._authenticated = True
-        client.nonce = "n"
         client.user_id = "42"
-        client.session.post = MagicMock(
-            return_value=MagicMock(
-                text=raw, raise_for_status=lambda: None
-            )
-        )
-
-        results = client.find_foods("xyzzy_no_match")
-        assert results == []
+        client.session.get = MagicMock(return_value=self._mock_response([]))
+        assert client.find_foods("xyzzy_no_match") == []
 
     def test_find_foods_uppercases_query(self, client):
-        """Verify the GWT-RPC body is sent with an uppercased query."""
-        raw = _build_find_foods_response([])
         client._authenticated = True
-        client.nonce = "n"
         client.user_id = "42"
-        post_mock = MagicMock(
-            return_value=MagicMock(
-                text=raw, raise_for_status=lambda: None
-            )
-        )
-        client.session.post = post_mock
+        get_mock = MagicMock(return_value=self._mock_response([]))
+        client.session.get = get_mock
 
         client.find_foods("chicken breast")
 
-        call_body = post_mock.call_args[1].get("data") or post_mock.call_args[0][1]
-        assert "CHICKEN BREAST" in call_body
+        params = get_mock.call_args.kwargs["params"]
+        assert params["query"] == "CHICKEN BREAST"
+
+    def test_find_foods_hits_rest_endpoint_with_user_id(self, client):
+        client._authenticated = True
+        client.user_id = "98765"
+        get_mock = MagicMock(return_value=self._mock_response([]))
+        client.session.get = get_mock
+
+        client.find_foods("eggs")
+
+        url = get_mock.call_args.args[0]
+        assert url == (
+            "https://cronometer.com/api/v3/user/98765/food-search/string"
+        )
+        headers = get_mock.call_args.kwargs["headers"]
+        assert headers["X-CRONO-USE-OPEN-SEARCH"] == "false"
+
+    def test_find_foods_retries_once_on_401(self, client, tmp_path):
+        # First call: session rejected (401). find_foods should discard cached
+        # auth and retry once, succeeding on the second call.
+        client.authenticate = MagicMock()
+        client.user_id = "42"
+        client._cookie_path = tmp_path / "missing_cookies"
+        ok = self._mock_response(_FOOD_SEARCH_JSON)
+        unauth = self._mock_response(None, status=401)
+        client.session.get = MagicMock(side_effect=[unauth, ok])
+
+        results = client.find_foods("eggs")
+
+        assert client.session.get.call_count == 2
+        assert client.authenticate.call_count == 2
+        assert len(results) == 2
+
+    def test_find_foods_does_not_retry_other_http_errors(self, client):
+        client._authenticated = True
+        client.user_id = "42"
+        boom = self._mock_response(None, status=500)
+        client.session.get = MagicMock(return_value=boom)
+
+        with pytest.raises(requests.HTTPError):
+            client.find_foods("eggs")
+        assert client.session.get.call_count == 1
 
 
 # ---------------------------------------------------------------------------
