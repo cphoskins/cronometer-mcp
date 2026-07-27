@@ -177,14 +177,17 @@ Output files:
 
 ## How It Works
 
-Cronometer does not have a public API for individual users. This server uses the same GWT-RPC (Google Web Toolkit Remote Procedure Call) protocol that the Cronometer web app uses internally:
+Cronometer does not have a public API for individual users. This server uses
+the same authenticated web endpoints as the Cronometer app, including GWT-RPC
+(Google Web Toolkit Remote Procedure Call) and its JSON food-search endpoint:
 
 1. Fetches the login page to get an anti-CSRF token
 2. POSTs credentials to authenticate
 3. Calls GWT-RPC `authenticate` to get a user ID
 4. Calls GWT-RPC `generateAuthorizationToken` for short-lived export tokens
 5. Downloads CSV exports using the token
-6. Calls GWT-RPC methods directly for diary edits, fasting, biometrics, macro targets, and repeat items
+6. Uses the JSON food-search endpoint for food lookup
+7. Calls GWT-RPC methods directly for diary edits, fasting, biometrics, macro targets, and repeat items
 
 Session cookies are persisted to `~/.local/share/cronometer-mcp/.session_cookies` so that subsequent invocations reuse the session without re-authenticating (Cronometer has aggressive login rate limiting).
 

@@ -4,7 +4,12 @@ import pytest
 from unittest.mock import patch, MagicMock
 from datetime import date
 
-from cronometer_mcp.client import CronometerClient, EXPORT_TYPES, UNIVERSAL_MEASURE_ID
+from cronometer_mcp.client import (
+    CronometerClient,
+    EXPORT_TYPES,
+    FOOD_SEARCH_URL,
+    UNIVERSAL_MEASURE_ID,
+)
 
 
 @pytest.fixture
@@ -551,69 +556,146 @@ class TestParseFindFoods:
 
 
 class TestFindFoodsIntegration:
-    """Tests for find_foods() — verifies it calls _parse_find_foods and returns
-    a list[dict] instead of a raw string."""
+    """Tests for the current REST-backed find_foods implementation."""
 
     def test_find_foods_returns_list(self, client):
-        raw = _build_find_foods_response(
-            [
-                {
-                    "name": "Broccoli",
-                    "measure_desc": "1 cup",
-                    "food_id": 300,
-                    "food_source_id": 100,
-                    "score": 95,
-                    "keywords": "broccoli",
-                }
-            ]
-        )
         client._authenticated = True
         client.nonce = "n"
         client.user_id = "42"
-        client.session.post = MagicMock(
-            return_value=MagicMock(
-                text=raw, raise_for_status=lambda: None
-            )
-        )
+        response = MagicMock()
+        response.json.return_value = [
+            {
+                "name": "Broccoli",
+                "id": 100,
+                "measureId": 300,
+                "measureDisplayName": "1 cup",
+                "score": 95,
+                "source": "NCCDB",
+                "type": "FOOD",
+            }
+        ]
+        client.session.get = MagicMock(return_value=response)
 
         results = client.find_foods("broccoli")
 
         assert isinstance(results, list)
         assert len(results) == 1
-        assert results[0]["name"] == "Broccoli"
-        assert results[0]["food_id"] == 300
+        assert results[0] == {
+            "food_id": 300,
+            "food_source_id": 100,
+            "name": "Broccoli",
+            "measure_desc": "1 cup",
+            "score": 95,
+        }
+        response.raise_for_status.assert_called_once_with()
 
     def test_find_foods_zero_results(self, client):
-        raw = _build_find_foods_response([])
         client._authenticated = True
         client.nonce = "n"
         client.user_id = "42"
-        client.session.post = MagicMock(
-            return_value=MagicMock(
-                text=raw, raise_for_status=lambda: None
-            )
-        )
+        response = MagicMock()
+        response.json.return_value = []
+        client.session.get = MagicMock(return_value=response)
 
         results = client.find_foods("xyzzy_no_match")
         assert results == []
 
     def test_find_foods_uppercases_query(self, client):
-        """Verify the GWT-RPC body is sent with an uppercased query."""
-        raw = _build_find_foods_response([])
+        """Verify the REST request matches the current official web client."""
         client._authenticated = True
         client.nonce = "n"
         client.user_id = "42"
-        post_mock = MagicMock(
-            return_value=MagicMock(
-                text=raw, raise_for_status=lambda: None
-            )
+        response = MagicMock()
+        response.json.return_value = []
+        get_mock = MagicMock(return_value=response)
+        client.session.get = get_mock
+
+        client.find_foods("chicken breast", max_results=25)
+
+        get_mock.assert_called_once_with(
+            FOOD_SEARCH_URL.format(user_id="42"),
+            params={
+                "query": "CHICKEN BREAST",
+                "maxResults": 25,
+                "sources": "All",
+                "categoryId": 0,
+                "selectedTab": "ALL",
+                "type": "All",
+            },
         )
-        client.session.post = post_mock
 
-        client.find_foods("chicken breast")
+    def test_find_foods_maps_custom_food(self, client):
+        client._authenticated = True
+        client.user_id = "42"
+        response = MagicMock()
+        response.json.return_value = [
+            {
+                "name": "My Custom Granola",
+                "id": 7654321,
+                "measureId": 1234567,
+                "measureDisplayName": "1 serving - 60g",
+                "score": 1200,
+                "source": "CRDB",
+                "type": "FOOD",
+            }
+        ]
+        client.session.get = MagicMock(return_value=response)
 
-        call_body = post_mock.call_args[1].get("data") or post_mock.call_args[0][1]
-        assert "CHICKEN BREAST" in call_body
+        assert client.find_foods("my custom granola") == [
+            {
+                "food_id": 1234567,
+                "food_source_id": 7654321,
+                "name": "My Custom Granola",
+                "measure_desc": "1 serving - 60g",
+                "score": 1200,
+            }
+        ]
+
+    def test_find_foods_rejects_unexpected_response_shape(self, client):
+        client._authenticated = True
+        client.user_id = "42"
+        response = MagicMock()
+        response.json.return_value = {"foods": []}
+        client.session.get = MagicMock(return_value=response)
+
+        with pytest.raises(RuntimeError, match="unexpected response shape"):
+            client.find_foods("broccoli")
+
+    def test_find_foods_rejects_invalid_json(self, client):
+        client._authenticated = True
+        client.user_id = "42"
+        response = MagicMock()
+        response.json.side_effect = ValueError("not JSON")
+        client.session.get = MagicMock(return_value=response)
+
+        with pytest.raises(RuntimeError, match="invalid JSON"):
+            client.find_foods("broccoli")
+
+    def test_find_foods_skips_malformed_hits(self, client):
+        client._authenticated = True
+        client.user_id = "42"
+        response = MagicMock()
+        response.json.return_value = [
+            None,
+            {"name": "Missing IDs"},
+            {
+                "name": "Valid Food",
+                "id": 10,
+                "measureId": 20,
+                "score": "unknown",
+            },
+        ]
+        client.session.get = MagicMock(return_value=response)
+
+        assert client.find_foods("valid") == [
+            {
+                "food_id": 20,
+                "food_source_id": 10,
+                "name": "Valid Food",
+                "measure_desc": "",
+                "score": 0,
+            }
+        ]
 
 
 # ---------------------------------------------------------------------------

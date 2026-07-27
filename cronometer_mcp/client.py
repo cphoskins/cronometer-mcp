@@ -27,6 +27,9 @@ LOGIN_HTML_URL = "https://cronometer.com/login/"
 LOGIN_API_URL = "https://cronometer.com/login"
 GWT_BASE_URL = "https://cronometer.com/cronometer/app"
 EXPORT_URL = "https://cronometer.com/export"
+FOOD_SEARCH_URL = (
+    "https://cronometer.com/api/v3/user/{user_id}/food-search/string"
+)
 GWT_NOCACHE_JS_URL = "https://cronometer.com/cronometer/cronometer.nocache.js"
 GWT_CACHE_JS_URL = "https://cronometer.com/cronometer/{permutation}.cache.js"
 
@@ -58,18 +61,6 @@ GWT_GENERATE_AUTH_TOKEN = (
     "generateAuthorizationToken|java.lang.String/2004016611|"
     "I|com.cronometer.shared.user.AuthScope/2065601159|"
     "{nonce}|1|2|3|4|4|5|6|6|7|8|{user_id}|3600|7|2|"
-)
-
-GWT_FIND_FOODS = (
-    "7|0|12|https://cronometer.com/cronometer/|"
-    "{gwt_header}|"
-    "com.cronometer.shared.rpc.CronometerService|"
-    "findFoods|java.lang.String/2004016611|"
-    "I|[Lcom.cronometer.shared.foods.FoodSource;/3597302983|"
-    "com.cronometer.shared.foods.FoodSearchTabSelection/1776179901|"
-    "Z|{nonce}|{query}|"
-    "com.cronometer.shared.foods.FoodSource/4236433762|"
-    "1|2|3|4|8|5|5|6|7|6|5|8|9|10|11|{max_results}|7|1|12|0|0|0|8|0|0|"
 )
 
 GWT_UPDATE_DIARY = (
@@ -817,7 +808,7 @@ class CronometerClient:
         """Search Cronometer's food database.
 
         Args:
-            query: Search term.  The Cronometer web app uppercases queries
+            query: Search term. The Cronometer web app uppercases queries
                    before sending; this method does the same automatically.
             max_results: Maximum number of results to return (default 50).
 
@@ -832,15 +823,74 @@ class CronometerClient:
             - ``score`` (int): Relevance score from the search engine.
         """
         self.authenticate()
-        body = (
-            GWT_FIND_FOODS
-            .replace("{gwt_header}", self.gwt_header)
-            .replace("{nonce}", self.nonce or "")
-            .replace("{query}", query.upper())
-            .replace("{max_results}", str(max_results))
+        if not self.user_id:
+            raise RuntimeError("Food search requires an authenticated user ID")
+
+        resp = self.session.get(
+            FOOD_SEARCH_URL.format(user_id=self.user_id),
+            params={
+                "query": query.upper(),
+                "maxResults": max_results,
+                "sources": "All",
+                "categoryId": 0,
+                "selectedTab": "ALL",
+                "type": "All",
+            },
         )
-        raw = self._gwt_post(body)
-        return self._parse_find_foods(raw)
+        resp.raise_for_status()
+        try:
+            hits = resp.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                "Cronometer food search returned invalid JSON"
+            ) from exc
+        return self._parse_food_search_hits(hits)
+
+    @staticmethod
+    def _parse_food_search_hits(hits: object) -> list[dict]:
+        """Map the current food-search JSON response to the public result shape."""
+        if not isinstance(hits, list):
+            raise RuntimeError(
+                "Cronometer food search returned an unexpected response shape"
+            )
+
+        foods: list[dict] = []
+        for hit in hits:
+            if not isinstance(hit, dict):
+                continue
+
+            food_id = hit.get("measureId")
+            food_source_id = hit.get("id")
+            name = hit.get("name") or hit.get("displayString")
+            if (
+                not isinstance(food_id, int)
+                or isinstance(food_id, bool)
+                or not isinstance(food_source_id, int)
+                or isinstance(food_source_id, bool)
+                or not isinstance(name, str)
+                or not name
+            ):
+                continue
+
+            score = hit.get("score", 0)
+            if not isinstance(score, (int, float)) or isinstance(score, bool):
+                score = 0
+
+            measure_desc = hit.get("measureDisplayName")
+            if not isinstance(measure_desc, str):
+                measure_desc = ""
+
+            foods.append(
+                {
+                    "food_id": food_id,
+                    "food_source_id": food_source_id,
+                    "name": name,
+                    "measure_desc": measure_desc,
+                    "score": int(score),
+                }
+            )
+
+        return foods
 
     def get_food(self, food_source_id: int) -> dict:
         """Get detailed food information including available measures.
