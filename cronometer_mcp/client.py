@@ -826,17 +826,31 @@ class CronometerClient:
         if not self.user_id:
             raise RuntimeError("Food search requires an authenticated user ID")
 
+        params = {
+            "query": query.upper(),
+            "maxResults": max_results,
+            "sources": "All",
+            "categoryId": 0,
+            "selectedTab": "ALL",
+            "type": "All",
+        }
         resp = self.session.get(
-            FOOD_SEARCH_URL.format(user_id=self.user_id),
-            params={
-                "query": query.upper(),
-                "maxResults": max_results,
-                "sources": "All",
-                "categoryId": 0,
-                "selectedTab": "ALL",
-                "type": "All",
-            },
+            FOOD_SEARCH_URL.format(user_id=self.user_id), params=params
         )
+        if resp.status_code == 401:
+            # A restored browser session can still be rejected by the newer
+            # JSON endpoint. Discard it and retry once with a fresh login.
+            self._authenticated = False
+            self.session.cookies.clear()
+            self._cookie_path.unlink(missing_ok=True)
+            self.nonce = None
+            self.user_id = None
+            self.authenticate()
+            if not self.user_id:
+                raise RuntimeError("Food search requires an authenticated user ID")
+            resp = self.session.get(
+                FOOD_SEARCH_URL.format(user_id=self.user_id), params=params
+            )
         resp.raise_for_status()
         try:
             hits = resp.json()
