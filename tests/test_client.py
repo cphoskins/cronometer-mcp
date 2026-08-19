@@ -593,30 +593,39 @@ class TestParseFindFoods:
 
 
 class TestFindFoodsIntegration:
-    """Tests for find_foods() — verifies it calls _parse_find_foods and returns
-    a list[dict] instead of a raw string."""
+    """Tests for find_foods() — now backed by the REST food-search API.
 
-    def test_find_foods_returns_list(self, client):
-        raw = _build_find_foods_response(
-            [
-                {
-                    "name": "Broccoli",
-                    "measure_desc": "1 cup",
-                    "food_id": 300,
-                    "food_source_id": 100,
-                    "score": 95,
-                    "keywords": "broccoli",
-                }
-            ]
-        )
-        client._authenticated = True
-        client.nonce = "n"
-        client.user_id = "42"
-        client.session.post = MagicMock(
+    Cronometer removed the findFoods GWT-RPC method (its FoodSearchTabSelection
+    parameter type is gone from the serialization policy), so these mock
+    session.get rather than the GWT POST path.
+    """
+
+    @staticmethod
+    def _hit(name, food_source_id, food_id, measure="1 cup", score=95, source="NCCDB"):
+        """One REST search hit. Note measureId carries the client's food_id."""
+        return {
+            "name": name,
+            "id": food_source_id,
+            "measureId": food_id,
+            "measureDisplayName": measure,
+            "score": score,
+            "source": source,
+            "type": "FOOD",
+        }
+
+    def _mock_get(self, client, payload):
+        get_mock = MagicMock(
             return_value=MagicMock(
-                text=raw, raise_for_status=lambda: None
+                json=lambda: payload, raise_for_status=lambda: None
             )
         )
+        client._authenticated = True
+        client.user_id = "42"
+        client.session.get = get_mock
+        return get_mock
+
+    def test_find_foods_returns_list(self, client):
+        self._mock_get(client, [self._hit("Broccoli", 100, 300)])
 
         results = client.find_foods("broccoli")
 
@@ -624,38 +633,50 @@ class TestFindFoodsIntegration:
         assert len(results) == 1
         assert results[0]["name"] == "Broccoli"
         assert results[0]["food_id"] == 300
+        assert results[0]["food_source_id"] == 100
+        assert results[0]["measure_desc"] == "1 cup"
 
     def test_find_foods_zero_results(self, client):
-        raw = _build_find_foods_response([])
-        client._authenticated = True
-        client.nonce = "n"
-        client.user_id = "42"
-        client.session.post = MagicMock(
-            return_value=MagicMock(
-                text=raw, raise_for_status=lambda: None
-            )
-        )
-
-        results = client.find_foods("xyzzy_no_match")
-        assert results == []
+        self._mock_get(client, [])
+        assert client.find_foods("xyzzy_no_match") == []
 
     def test_find_foods_uppercases_query(self, client):
-        """Verify the GWT-RPC body is sent with an uppercased query."""
-        raw = _build_find_foods_response([])
-        client._authenticated = True
-        client.nonce = "n"
-        client.user_id = "42"
-        post_mock = MagicMock(
-            return_value=MagicMock(
-                text=raw, raise_for_status=lambda: None
-            )
-        )
-        client.session.post = post_mock
+        get_mock = self._mock_get(client, [])
 
         client.find_foods("chicken breast")
 
-        call_body = post_mock.call_args[1].get("data") or post_mock.call_args[0][1]
-        assert "CHICKEN BREAST" in call_body
+        params = get_mock.call_args[1]["params"]
+        assert params["query"] == "CHICKEN BREAST"
+
+    def test_find_foods_hits_user_scoped_url(self, client):
+        get_mock = self._mock_get(client, [])
+
+        client.find_foods("eggs")
+
+        url = get_mock.call_args[0][0]
+        assert url == "https://cronometer.com/api/v3/user/42/food-search/string"
+
+    def test_find_foods_passes_max_results(self, client):
+        get_mock = self._mock_get(client, [])
+
+        client.find_foods("eggs", max_results=250)
+
+        assert get_mock.call_args[1]["params"]["maxResults"] == 250
+
+    def test_measure_id_field_maps_to_food_id(self, client):
+        """Regression guard: REST 'measureId' is food_id, NOT a measure id.
+
+        Real values from Safe Catch tuna. Mapping these the obvious-looking way
+        round produces diary entries that cannot be resolved.
+        """
+        self._mock_get(
+            client, [self._hit("Safe Catch, Wild Elite Pure Tuna", 24272784, 66395420)]
+        )
+
+        food = client.find_foods("safe catch")[0]
+
+        assert food["food_source_id"] == 24272784
+        assert food["food_id"] == 66395420
 
 
 # ---------------------------------------------------------------------------

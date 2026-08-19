@@ -27,6 +27,12 @@ LOGIN_HTML_URL = "https://cronometer.com/login/"
 LOGIN_API_URL = "https://cronometer.com/login"
 GWT_BASE_URL = "https://cronometer.com/cronometer/app"
 EXPORT_URL = "https://cronometer.com/export"
+
+# Food search moved off GWT-RPC to a REST JSON API (observed 2026-08-19).
+# The old findFoods RPC no longer exists: its FoodSearchTabSelection
+# parameter type was removed from Cronometer's serialization policy, so
+# calling it returns IncompatibleRemoteServiceException.
+FOOD_SEARCH_URL = "https://cronometer.com/api/v3/user/{user_id}/food-search/string"
 GWT_NOCACHE_JS_URL = "https://cronometer.com/cronometer/cronometer.nocache.js"
 GWT_CACHE_JS_URL = "https://cronometer.com/cronometer/{permutation}.cache.js"
 
@@ -60,6 +66,8 @@ GWT_GENERATE_AUTH_TOKEN = (
     "{nonce}|1|2|3|4|4|5|6|6|7|8|{user_id}|3600|7|2|"
 )
 
+# DEAD: Cronometer removed the findFoods RPC (see FOOD_SEARCH_URL above).
+# Kept for reference only - nothing calls this. Safe to delete.
 GWT_FIND_FOODS = (
     "7|0|12|https://cronometer.com/cronometer/|"
     "{gwt_header}|"
@@ -654,6 +662,11 @@ class CronometerClient:
 
     @staticmethod
     def _parse_find_foods(raw: str) -> list[dict]:
+        """DEAD: parser for the removed findFoods RPC. Nothing calls this.
+
+        Retained only because it documents the GWT string-table decoding
+        approach. Food search now goes through FOOD_SEARCH_URL.
+        """
         """Parse a GWT-RPC findFoods response into structured food records.
 
         The GWT-RPC wire format encodes all strings in a string table at the
@@ -825,33 +838,70 @@ class CronometerClient:
         return results
 
     def find_foods(self, query: str, max_results: int = 50) -> list[dict]:
-        """Search Cronometer's food database.
+        """Search Cronometer's food database via the REST food-search API.
+
+        Backed by FOOD_SEARCH_URL, not GWT-RPC: Cronometer removed the findFoods
+        RPC, so the old pipe-delimited path can no longer work.
 
         Args:
             query: Search term.  The Cronometer web app uppercases queries
                    before sending; this method does the same automatically.
             max_results: Maximum number of results to return (default 50).
+                         The web app uses 50 for typeahead, 250 for a full
+                         search.
 
         Returns:
             List of dicts, each with keys:
 
-            - ``food_id`` (int): Numeric food identifier.
-            - ``food_source_id`` (int): Source database identifier (e.g. USDA).
+            - ``food_id`` (int): Numeric food identifier. Pass to add_serving.
+            - ``food_source_id`` (int): Source database identifier. Pass to
+              add_serving and get_food.
             - ``name`` (str): Food name as stored in Cronometer.
             - ``measure_desc`` (str): Default measure description
               (e.g. ``"1 large - 50g"``).
             - ``score`` (int): Relevance score from the search engine.
+            - ``source`` (str): Origin database (``NCCDB``, ``USDA``, ``CRDB``,
+              ``FDCBranded``, ...). Useful for picking a canonical entry when
+              several databases carry the same food.
+            - ``type`` (str): ``FOOD``, ``RECIPE`` or similar.
+
+            Unlike the old RPC, this returns both ids, so a follow-up get_food()
+            call is no longer needed just to resolve food_id.
         """
         self.authenticate()
-        body = (
-            GWT_FIND_FOODS
-            .replace("{gwt_header}", self.gwt_header)
-            .replace("{nonce}", self.nonce or "")
-            .replace("{query}", query.upper())
-            .replace("{max_results}", str(max_results))
+        resp = self.session.get(
+            FOOD_SEARCH_URL.format(user_id=self.user_id),
+            params={
+                "query": query.upper(),
+                "maxResults": max_results,
+                "sources": "All",
+                "categoryId": 0,
+                "selectedTab": "ALL",
+                "type": "All",
+            },
         )
-        raw = self._gwt_post(body)
-        return self._parse_find_foods(raw)
+        resp.raise_for_status()
+        return [self._map_search_hit(hit) for hit in resp.json()]
+
+    @staticmethod
+    def _map_search_hit(hit: dict) -> dict:
+        """Map one REST food-search hit onto the find_foods() contract.
+
+        Careful with the id fields: the REST payload's ``measureId`` is what the
+        rest of this client calls ``food_id``, and its ``id`` is
+        ``food_source_id``. Verified against a known food (Safe Catch tuna =
+        food_source_id 24272784 / food_id 66395420). Taking ``measureId`` to be
+        a measure id would silently produce unusable diary entries.
+        """
+        return {
+            "food_id": hit.get("measureId"),
+            "food_source_id": hit.get("id"),
+            "name": hit.get("name", ""),
+            "measure_desc": hit.get("measureDisplayName", ""),
+            "score": hit.get("score", 0),
+            "source": hit.get("source", ""),
+            "type": hit.get("type", ""),
+        }
 
     def get_food(self, food_source_id: int) -> dict:
         """Get detailed food information including available measures.
