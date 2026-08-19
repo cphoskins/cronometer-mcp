@@ -127,6 +127,48 @@ class TestAuthentication:
         token = client._generate_auth_token()
         assert token == "abc-token-123"
 
+    def test_generate_auth_token_rejects_gwt_exception(self, client):
+        """A dead session returns HTTP 200 with a //EX payload.
+
+        Without the //EX guard the first-quoted-string regex extracts
+        "com.cronometer...NotLoggedInException/844385496" and returns it as a
+        token, so _restore_session() caches a dead session and every later
+        export 403s with the exception name in the nonce parameter.
+        """
+        client.nonce = "test_nonce"
+        client.user_id = "12345"
+
+        mock_resp = MagicMock()
+        mock_resp.text = (
+            '//EX[2,1,["com.cronometer.shared.user.exceptions.'
+            'NotLoggedInException/844385496","Invalid or expired session"],0,7]'
+        )
+        client.session.post = MagicMock(return_value=mock_resp)
+
+        with pytest.raises(RuntimeError, match="Session rejected"):
+            client._generate_auth_token()
+
+    def test_restore_session_rejects_dead_session(self, client, tmp_path):
+        """_restore_session must return False (and bin the pickle) on //EX."""
+        import pickle
+
+        client._cookie_path = tmp_path / ".session_cookies"
+        client._cookie_path.write_bytes(pickle.dumps({
+            "cookies": {"sesnonce": "stale"}, "nonce": "stale",
+            "user_id": "12345", "gwt_permutation": "P", "gwt_header": "H",
+        }))
+
+        mock_resp = MagicMock()
+        mock_resp.text = (
+            '//EX[2,1,["com.cronometer.shared.user.exceptions.'
+            'NotLoggedInException/844385496","Invalid or expired session"],0,7]'
+        )
+        with patch.object(client, "_discover_gwt_hashes"):
+            client.session.post = MagicMock(return_value=mock_resp)
+            assert client._restore_session() is False
+
+        assert not client._cookie_path.exists()
+
     def test_authenticate_full_flow(self, client):
         with patch.object(client, "_restore_session", return_value=False) as m0, \
              patch.object(client, "_discover_gwt_hashes") as md, \

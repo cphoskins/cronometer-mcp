@@ -496,6 +496,17 @@ class CronometerClient:
         )
         resp.raise_for_status()
 
+        # A dead session still returns HTTP 200, with a GWT exception payload:
+        #   //EX[2,1,["...NotLoggedInException/844385496","Invalid or expired
+        #   session"],0,7]
+        # The regex below would happily extract the exception class name as the
+        # "token", so _restore_session() would treat a dead session as valid and
+        # every later export would 403. Reject //EX before parsing.
+        if resp.text.lstrip().startswith("//EX"):
+            raise RuntimeError(
+                f"Session rejected while generating auth token: {resp.text[:200]}"
+            )
+
         match = re.search(r'"([^"]+)"', resp.text)
         if not match:
             raise RuntimeError(
