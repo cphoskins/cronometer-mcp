@@ -43,6 +43,11 @@ GWT_CACHE_JS_URL = "https://cronometer.com/cronometer/{permutation}.cache.js"
 # correct weight_grams produces working entries for ALL food sources.
 UNIVERSAL_MEASURE_ID = 124399
 
+# Cronometer Gold exposes 8 diary group slots, settings keys DG01-DG08.
+# Cronometer has a public request open to raise this; derive ranges from
+# what is actually parsed rather than hardcoding 8 in more places.
+DIARY_GROUP_SLOTS = 8
+
 # GWT magic values — used as fallbacks if auto-discovery fails.
 DEFAULT_GWT_CONTENT_TYPE = "text/x-gwt-rpc; charset=UTF-8"
 DEFAULT_GWT_MODULE_BASE = "https://cronometer.com/cronometer/"
@@ -375,6 +380,7 @@ class CronometerClient:
         self.nonce: str | None = None
         self.user_id: str | None = None
         self._authenticated = False
+        self._diary_groups: list[dict] | None = None
         self._cookie_path = Path(
             os.environ.get("CRONOMETER_DATA_DIR", Path.home() / ".local" / "share" / "cronometer-mcp")
         ) / ".session_cookies"
@@ -480,6 +486,10 @@ class CronometerClient:
                 f"Response: {resp.text[:200]}"
             )
         self.user_id = match.group(1)
+
+        # The settings map in this same response carries the user's diary
+        # groups. Parse it here so the fresh-login path costs no extra call.
+        self._diary_groups = self._parse_diary_groups(resp.text)
 
         # Update nonce from cookies
         new_nonce = self.session.cookies.get("sesnonce")
@@ -911,6 +921,127 @@ class CronometerClient:
             "source": hit.get("source", ""),
             "type": hit.get("type", ""),
         }
+
+    # ------------------------------------------------------------------
+    # Diary groups
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_diary_groups(raw: str) -> list[dict]:
+        """Extract the user's diary groups from an authenticate() response.
+
+        Cronometer Gold exposes 8 diary group slots. They arrive as settings
+        keys ``DG01``-``DG08`` (display names) alongside ``DG01ON``-``DG08ON``
+        (enable flags), inside the settings map the authenticate call already
+        returns.
+
+        The wire ``diary_group`` value used by updateDiary is **0-based** over
+        those slots, so ``DG01`` is wire index 0. On a default account the four
+        standard meals occupy DG02-DG05, which is why the legacy hardcoded map
+        (breakfast=1 ... snacks=4) was correct.
+
+        Encoding note: the settings map is a flat ``type_ref, string_ref``
+        stream in which **the value precedes its key**. So for a key token at
+        position ``p``, the value is the string token at ``p - 2``. Do not try
+        to read the value *after* the key, and do not rely on the two strings
+        being adjacent in the string table — that holds only for values unique
+        to one key, and breaks for the shared "true"/"false" flag values.
+
+        Returns:
+            List of dicts ordered by wire index, each with ``wire_index``
+            (int), ``settings_key`` (str), ``name`` (str) and ``enabled``
+            (bool). Empty list if the response carries no DG keys.
+        """
+        try:
+            table = CronometerClient._extract_gwt_string_table(raw)
+        except Exception:
+            return []
+        if not table:
+            return []
+
+        ref_of = {s: str(i + 1) for i, s in enumerate(table)}
+        body = raw[: raw.rindex('["')]
+        tokens = [tok for tok in body.split(",") if tok.strip()]
+
+        def value_for(key: str) -> str | None:
+            ref = ref_of.get(key)
+            if ref is None:
+                return None
+            pos = next((i for i, tok in enumerate(tokens) if tok == ref), None)
+            if pos is None or pos < 2:
+                return None
+            tok = tokens[pos - 2]
+            if not tok.isdigit():
+                return None
+            i = int(tok)
+            return table[i - 1] if 0 < i <= len(table) else None
+
+        groups = []
+        for slot in range(1, DIARY_GROUP_SLOTS + 1):
+            key = f"DG{slot:02d}"
+            name = value_for(key)
+            if name is None:
+                continue
+            groups.append({
+                "wire_index": slot - 1,
+                "settings_key": key,
+                "name": name,
+                "enabled": value_for(f"{key}ON") == "true",
+            })
+        return groups
+
+    def _fetch_diary_groups(self) -> list[dict]:
+        """Re-issue authenticate() purely to read the settings map."""
+        body = GWT_AUTHENTICATE.replace("{gwt_header}", self.gwt_header)
+        resp = self.session.post(
+            GWT_BASE_URL,
+            data=body,
+            headers={
+                "content-type": DEFAULT_GWT_CONTENT_TYPE,
+                "x-gwt-module-base": DEFAULT_GWT_MODULE_BASE,
+                "x-gwt-permutation": self.gwt_permutation,
+            },
+        )
+        resp.raise_for_status()
+
+        # This call rotates the session nonce server-side. Without picking the
+        # new one up, self.nonce goes stale and the next GWT write fails with
+        # NotLoggedInException even though the session is perfectly alive.
+        new_nonce = self.session.cookies.get("sesnonce")
+        if new_nonce:
+            self.nonce = new_nonce
+
+        return self._parse_diary_groups(resp.text)
+
+    @property
+    def diary_groups(self) -> list[dict]:
+        """The user's diary groups, ordered by wire index.
+
+        Populated from the authenticate response, which the client already
+        receives on login — no extra round-trip on the fresh-login path. A
+        restored session fetches lazily on first access, so callers that never
+        touch diary groups never pay for it.
+
+        Falls back to the four default meals at wire 1-4 if nothing could be
+        parsed, so a parse regression degrades to the legacy behavior rather
+        than blocking every write.
+        """
+        self.authenticate()
+        if self._diary_groups is None:
+            try:
+                self._diary_groups = self._fetch_diary_groups()
+            except Exception:
+                logger.warning("Could not fetch diary groups", exc_info=True)
+                self._diary_groups = []
+        if not self._diary_groups:
+            return [
+                {"wire_index": i, "settings_key": f"DG{i + 1:02d}",
+                 "name": n, "enabled": True}
+                for i, n in enumerate(
+                    ["Breakfast", "Lunch", "Dinner", "Snacks"], start=1
+                )
+            ]
+        return self._diary_groups
 
     def get_food(self, food_source_id: int) -> dict:
         """Get detailed food information including available measures.

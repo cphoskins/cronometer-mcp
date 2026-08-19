@@ -301,6 +301,9 @@ def export_raw_csv(
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
+# Legacy fallback only. Diary group slots are user-configurable, so these
+# names are correct for a default account and wrong for a customized one.
+# _resolve_diary_group() consults the account's real groups instead.
 _DIARY_GROUP_MAP: dict[str, int] = {
     "breakfast": 1,
     "lunch": 2,
@@ -309,8 +312,8 @@ _DIARY_GROUP_MAP: dict[str, int] = {
 }
 
 
-def _default_diary_group() -> str:
-    """Pick a meal slot based on current time of day."""
+def _default_group_name() -> str:
+    """The canonical meal name for the current time of day."""
     from datetime import datetime
 
     hour = datetime.now().hour
@@ -321,6 +324,112 @@ def _default_diary_group() -> str:
     elif hour < 21:
         return "dinner"
     return "snacks"
+
+
+def _format_groups(groups: list[dict]) -> str:
+    """Render the account's groups for an error message."""
+    return ", ".join(
+        f"{g['wire_index']}={g['name']!r}" + ("" if g["enabled"] else " (disabled)")
+        for g in groups
+    )
+
+
+def _resolve_diary_group(client, diary_group) -> tuple[int | None, str | None]:
+    """Resolve a diary_group argument to a wire index.
+
+    Accepts a group name (case-insensitive, matched against the account's own
+    group names) or a 0-based wire index. Returns ``(wire_index, None)`` on
+    success or ``(None, error_message)`` on failure.
+
+    Never falls back to a default when a name fails to match: silently logging
+    food into the wrong meal is worse than an error, and is the defect this
+    resolver exists to fix. Cronometer itself accepts out-of-range indices
+    without complaint and the resulting entries are unreachable, so every
+    check here has to happen client-side.
+    """
+    groups = client.diary_groups
+
+    if diary_group is None or (isinstance(diary_group, str) and not diary_group.strip()):
+        wanted = _default_group_name()
+        match = next(
+            (g for g in groups if g["enabled"] and g["name"].strip().lower() == wanted),
+            None,
+        )
+        if match is None:
+            return None, (
+                f"No enabled diary group named '{wanted}' on this account, so the "
+                f"time-of-day default cannot be applied. Pass diary_group "
+                f"explicitly. Your groups: {_format_groups(groups)}"
+            )
+        return match["wire_index"], None
+
+    # Explicit wire index
+    raw = str(diary_group).strip()
+    if raw.lstrip("-").isdigit():
+        idx = int(raw)
+        match = next((g for g in groups if g["wire_index"] == idx), None)
+        if match is None:
+            return None, (
+                f"diary_group {idx} is out of range. Your groups: "
+                f"{_format_groups(groups)}"
+            )
+        if not match["enabled"]:
+            return None, (
+                f"Diary group {idx} ({match['name']!r}) is not enabled on this "
+                f"account. Enable it in Cronometer settings first. Your groups: "
+                f"{_format_groups(groups)}"
+            )
+        return idx, None
+
+    # Name match against the account's own group names
+    key = raw.lower()
+    match = next((g for g in groups if g["name"].strip().lower() == key), None)
+    if match is None:
+        return None, (
+            f"No diary group named {raw!r} on this account. Your groups: "
+            f"{_format_groups(groups)}"
+        )
+    if not match["enabled"]:
+        return None, (
+            f"Diary group {match['name']!r} is not enabled on this account. "
+            f"Enable it in Cronometer settings first. Your groups: "
+            f"{_format_groups(groups)}"
+        )
+    return match["wire_index"], None
+
+
+@mcp.tool()
+def list_diary_groups() -> str:
+    """List this account's diary groups, with the values add_food_entry accepts.
+
+    Diary group names are user-configured in Cronometer, so they are NOT
+    always Breakfast/Lunch/Dinner/Snacks. Call this before assuming a name
+    exists — an account may rename any slot or enable extra ones.
+
+    Returns each group's wire_index (the 0-based value add_food_entry takes),
+    its name, and whether it is enabled. Only enabled groups can be written to.
+    """
+    try:
+        client = _get_client()
+        groups = client.diary_groups
+        return json.dumps({
+            "status": "success",
+            "count": len(groups),
+            "groups": [
+                {
+                    "wire_index": g["wire_index"],
+                    "name": g["name"],
+                    "enabled": g["enabled"],
+                }
+                for g in groups
+            ],
+            "note": (
+                "Pass either the name or the wire_index as diary_group. "
+                "Disabled groups are rejected."
+            ),
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
 @mcp.tool()
@@ -381,7 +490,7 @@ def add_food_entry(
     date: str,
     measure_id: int = 0,
     quantity: float = 0,
-    diary_group: str | None = None,
+    diary_group: str | int | None = None,
 ) -> str:
     """Add a food entry to the Cronometer diary.
 
@@ -401,20 +510,17 @@ def add_food_entry(
                     measure that works for all food sources.
         quantity: Number of servings. Defaults to weight_grams when
                   measure_id is 0 (universal gram-based measure).
-        diary_group: Meal slot — one of "Breakfast", "Lunch", "Dinner", "Snacks"
-                     (case-insensitive). Defaults to time-based selection if omitted.
+        diary_group: Diary group name (case-insensitive) or 0-based index.
+                     Names are user-configured and are not always
+                     Breakfast/Lunch/Dinner/Snacks — call list_diary_groups to
+                     see this account's groups. Defaults to a time-of-day
+                     choice among enabled groups if omitted.
     """
     try:
-        group_key = (diary_group or _default_diary_group()).strip().lower()
-        group_int = _DIARY_GROUP_MAP.get(group_key)
-        if group_int is None:
-            return json.dumps({
-                "status": "error",
-                "message": (
-                    f"Invalid diary_group '{diary_group}'. "
-                    "Must be one of: Breakfast, Lunch, Dinner, Snacks."
-                ),
-            })
+        client = _get_client()
+        group_int, group_err = _resolve_diary_group(client, diary_group)
+        if group_err is not None:
+            return json.dumps({"status": "error", "message": group_err})
 
         if measure_id == 0 and quantity == 0:
             quantity = weight_grams
@@ -422,7 +528,6 @@ def add_food_entry(
         from datetime import date as date_type
         log_date = date_type.fromisoformat(date)
 
-        client = _get_client()
         result = client.add_serving(
             food_id=food_id,
             food_source_id=food_source_id,
@@ -1067,7 +1172,7 @@ def add_repeat_item(
     food_source_id: int,
     quantity: float,
     food_name: str,
-    diary_group: str | None = None,
+    diary_group: str | int | None = None,
     days_of_week: str = "all",
 ) -> str:
     """Add a recurring food entry that auto-logs on selected days.
@@ -1082,22 +1187,18 @@ def add_repeat_item(
         food_source_id: Food source ID from search_foods results.
         quantity: Number of default servings.
         food_name: Display name for the food.
-        diary_group: Meal slot — "Breakfast", "Lunch", "Dinner", or "Snacks".
-                     Defaults to time-based selection if omitted.
+        diary_group: Diary group name (case-insensitive) or 0-based index.
+                     Names are user-configured — call list_diary_groups to see
+                     this account's groups. Defaults to a time-of-day choice
+                     among enabled groups if omitted.
         days_of_week: Comma-separated day numbers (0=Sun, 1=Mon, ..., 6=Sat),
                       or "all" for every day (default), or "weekdays", or "weekends".
     """
     try:
-        group_key = (diary_group or _default_diary_group()).strip().lower()
-        group_int = _DIARY_GROUP_MAP.get(group_key)
-        if group_int is None:
-            return json.dumps({
-                "status": "error",
-                "message": (
-                    f"Invalid diary_group '{diary_group}'. "
-                    "Must be one of: Breakfast, Lunch, Dinner, Snacks."
-                ),
-            })
+        client = _get_client()
+        group_int, group_err = _resolve_diary_group(client, diary_group)
+        if group_err is not None:
+            return json.dumps({"status": "error", "message": group_err})
 
         # Parse days_of_week
         days_str = days_of_week.strip().lower()
@@ -1110,7 +1211,6 @@ def add_repeat_item(
         else:
             days = [int(d.strip()) for d in days_of_week.split(",")]
 
-        client = _get_client()
         client.add_repeat_item(
             food_source_id=food_source_id,
             food_id=food_id,
