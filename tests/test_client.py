@@ -169,6 +169,34 @@ class TestAuthentication:
 
         assert not client._cookie_path.exists()
 
+    def test_restore_session_clears_stale_cookies(self, client, tmp_path):
+        """Dead cookies must leave the session, not just the pickle.
+
+        Cronometer serves /login/ without the anti-CSRF token to a request
+        still carrying a stale session cookie, so leaving them attached breaks
+        the fresh login that _restore_session's failure is supposed to trigger.
+        """
+        import pickle
+
+        client._cookie_path = tmp_path / ".session_cookies"
+        client._cookie_path.write_bytes(pickle.dumps({
+            "cookies": {"sesnonce": "stale"}, "nonce": "stale",
+            "user_id": "12345", "gwt_permutation": "P", "gwt_header": "H",
+        }))
+
+        mock_resp = MagicMock()
+        mock_resp.text = (
+            '//EX[2,1,["com.cronometer.shared.user.exceptions.'
+            'NotLoggedInException/844385496","Invalid or expired session"],0,7]'
+        )
+        with patch.object(client, "_discover_gwt_hashes"):
+            client.session.post = MagicMock(return_value=mock_resp)
+            client._restore_session()
+
+        assert len(client.session.cookies) == 0
+        assert client.nonce is None
+        assert client.user_id is None
+
     def test_authenticate_full_flow(self, client):
         with patch.object(client, "_restore_session", return_value=False) as m0, \
              patch.object(client, "_discover_gwt_hashes") as md, \

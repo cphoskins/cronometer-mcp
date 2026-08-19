@@ -557,6 +557,15 @@ class CronometerClient:
                 return True
         except Exception:
             pass
+
+        # Drop the dead cookies as well as the pickle. Leaving them on the
+        # session poisons the fresh login that follows: Cronometer serves
+        # /login/ differently to a request carrying a stale session cookie, and
+        # the anti-CSRF token is missing from that variant.
+        self.session.cookies.clear()
+        self.nonce = None
+        self.user_id = None
+        self._diary_groups = None
         self._cookie_path.unlink(missing_ok=True)
         return False
 
