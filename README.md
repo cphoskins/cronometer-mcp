@@ -103,6 +103,7 @@ If you installed from source with `pip install -e .`, you can also use the full 
 | Tool | Description |
 |------|-------------|
 | `search_foods` | Search the Cronometer food database |
+| `list_diary_groups` | List this account's diary groups and the values `diary_group` accepts |
 | `get_food_details` | Get full nutrition info and serving measure IDs for a food |
 | `add_food_entry` | Add a food entry to the diary |
 | `remove_food_entry` | Remove a food entry from the diary |
@@ -155,7 +156,14 @@ If you installed from source with `pip install -e .`, you can also use the full 
 All date parameters use `YYYY-MM-DD` format. Most tools default to today or the last 7 days when dates are omitted.
 
 Key parameter patterns:
-- `diary_group` — one of `"Breakfast"`, `"Lunch"`, `"Dinner"`, `"Snacks"` (case-insensitive)
+- `diary_group` — a diary group **name** (case-insensitive) or a **0-based index**.
+  Cronometer Gold gives every account 8 diary group slots and lets you rename and
+  enable them freely, so the names are account-specific and are *not* always
+  Breakfast/Lunch/Dinner/Snacks. Call `list_diary_groups` to see yours. On an
+  untouched account the four standard meals are indices `1`–`4` (index `0` is a
+  slot that ships disabled). Unknown names, disabled groups, and out-of-range
+  indices are rejected rather than silently defaulting — Cronometer itself
+  accepts a bad index without complaint and the entry becomes unreachable.
 - `days_of_week` — `"all"`, `"weekdays"`, `"weekends"`, or comma-separated day numbers (`0`=Sun through `6`=Sat)
 - `measure_id` — pass `0` to use the universal gram-based measure (works for all food sources)
 - `target_date` — pass `"all"` on `get_macro_targets` to get the full weekly schedule
@@ -243,9 +251,13 @@ client.add_repeat_item(
     measure_id=0,        # universal gram-based measure
     quantity=200,
     food_name="Oatmeal",
-    diary_group=1,       # Breakfast
+    diary_group=1,       # 0-based wire index; 1 == Breakfast on a default account
     days_of_week=[1, 2, 3, 4, 5],
 )
+
+# Diary groups are user-configured - check what this account actually has
+for g in client.diary_groups:
+    print(g["wire_index"], g["name"], g["enabled"])
 
 # Log a biometric
 client.add_biometric("weight", 218.5, date.today())
