@@ -2674,37 +2674,34 @@ class CronometerClient:
     def _parse_repeated_items(raw: str) -> list[dict]:
         """Parse a GWT-RPC getRepeatedItems response.
 
-        Response format example (1 item):
-        //OK[0,1055762,461776,658384,1,4,0,1,3,1,1,3.0,2,1,1,
-          ["java.util.ArrayList/...",
-           "com.cronometer.shared.repeatitems.RepeatItem/477684891",
-           "java.lang.Integer/3438268394",
-           "Wasa, Crispbread, Multi Grain"],0,7]
+        GWT writes the data section in reverse, so it is read back to front.
+        Per response: ArrayList ref, item count, then for each RepeatItem:
 
-        The string table has: ArrayList, RepeatItem, Integer, and food names.
-        Data section has interleaved values for each RepeatItem.
+            RepeatItem ref, quantity (float), flag, day_count,
+            day_count x (Integer ref, day value),
+            unknown, food_name ref, flag,
+            repeat_item_id, food_source_id, food_id, trailing
+
+        Two real responses confirm the layout::
+
+            coffee: 12.0, 1, 7 days[0-6], 0, name, 0, 658545, 5828,   16104
+            wasa:    3.0, 1, 1 day  [1],  0, name, 1, 658384, 461776, 1055762
+
+        and coffee's 5828 / 16104 match that food's ids from food search.
+
+        The previous implementation guessed positions by scanning for "large
+        ints", which left repeat_item_id as 0 on every item and so made
+        delete_repeat_item unable to target anything.
         """
         if not raw.startswith("//OK"):
             return []
 
-        # Extract string table
-        closing = ",0,7]"
-        st_close = len(raw) - len(closing) - 1
-        depth, pos, in_str = 1, st_close - 1, False
-        while pos >= 0 and depth > 0:
-            ch = raw[pos]
-            if ch == '"' and (pos == 0 or raw[pos - 1] != "\\"):
-                in_str = not in_str
-            elif not in_str:
-                if ch == "]":
-                    depth += 1
-                elif ch == "[":
-                    depth -= 1
-            pos -= 1
-        st_open = pos + 1
-        string_table = json.loads(raw[st_open:st_close + 1])
+        try:
+            string_table = CronometerClient._extract_gwt_string_table(raw)
+        except Exception:
+            return []
 
-        # Extract data tokens before string table
+        st_open = raw.rindex('["')
         data_section = raw[5:st_open].rstrip(",")
         if not data_section:
             return []
@@ -2714,83 +2711,65 @@ class CronometerClient:
             part = part.strip()
             if not part:
                 continue
-            if part.startswith('"') and part.endswith('"'):
-                tokens.append(part.strip('"'))
-                continue
             try:
                 tokens.append(float(part) if "." in part else int(part))
             except ValueError:
                 tokens.append(None)
 
-        # Find food names in string table (not type references)
-        type_prefixes = ("java.", "com.cronometer.")
-        food_names = [
-            s for s in string_table
-            if not any(s.startswith(p) for p in type_prefixes)
-        ]
+        rev = tokens[::-1]
 
-        # Find the RepeatItem type index
-        repeat_type_idx = None
-        for i, s in enumerate(string_table):
-            if "RepeatItem/" in s:
-                repeat_type_idx = i + 1
-                break
+        def name_at(ref) -> str:
+            if isinstance(ref, int) and 0 < ref <= len(string_table):
+                return string_table[ref - 1]
+            return ""
 
-        if repeat_type_idx is None:
-            return []
-
-        # Count items: look for the item count in the data
-        # The response starts with type refs then item data
-        # Find float values (quantities) to determine item count
-        float_tokens = [t for t in tokens if isinstance(t, float)]
-        item_count = len(float_tokens)  # each item has exactly one float (quantity)
-
-        if item_count == 0:
-            return []
-
-        items = []
-        # Parse items from the token stream
-        # Key pattern: large ints are food_source_id, measure_id, repeat_item_id
-        # Small ints include day counts, day-of-week values, diary group
-        # The float is the quantity
-
-        # Simple heuristic: split tokens into blocks per item
-        # Each item has: food_source_id, measure_id, repeat_item_id,
-        # day info, quantity, and references to food name
-
-        # Find positions of float values to split blocks
-        float_positions = [i for i, t in enumerate(tokens) if isinstance(t, float)]
-
-        for item_idx, fpos in enumerate(float_positions):
-            item = {
-                "repeat_item_id": 0,
-                "food_name": food_names[item_idx] if item_idx < len(food_names) else "",
-                "food_source_id": 0,
-                "measure_id": 0,
-                "quantity": tokens[fpos],
-                "diary_group": 0,
-                "days_of_week": [],
-            }
-
-            # Look backwards from the float to find large ints
-            # (food_source_id, measure_id, repeat_item_id)
-            large_ints = []
-            start = float_positions[item_idx - 1] + 1 if item_idx > 0 else 0
-            block = tokens[start:fpos]
-
-            for t in block:
-                if isinstance(t, int) and t > 10000:
-                    large_ints.append(t)
-
-            # Typical order: food_source_id, measure_id, repeat_item_id
-            if len(large_ints) >= 3:
-                item["food_source_id"] = large_ints[0]
-                item["measure_id"] = large_ints[1]
-                item["repeat_item_id"] = large_ints[2]
-            elif len(large_ints) == 2:
-                item["food_source_id"] = large_ints[0]
-                item["measure_id"] = large_ints[1]
-
-            items.append(item)
+        items: list[dict] = []
+        try:
+            i = 1                       # skip the ArrayList type ref
+            count = rev[i]; i += 1
+            if not isinstance(count, int) or count < 0:
+                return []
+            for _ in range(count):
+                i += 1                  # RepeatItem type ref
+                quantity = rev[i]; i += 1
+                i += 1                  # flag
+                day_count = rev[i]; i += 1
+                days: list = []
+                for _ in range(day_count):
+                    tok = rev[i]
+                    if isinstance(tok, int) and tok < 0:
+                        # GWT back-reference to an already-serialized Integer.
+                        # One token, not a (type ref, value) pair. Resolving it
+                        # would mean reproducing GWT's object table; the value
+                        # is reported as None rather than guessed. Getting the
+                        # token count right is what matters, since miscounting
+                        # here desynchronises every later field in the item.
+                        days.append(None); i += 1
+                    else:
+                        i += 1          # Integer type ref
+                        days.append(rev[i]); i += 1
+                i += 1                  # unknown
+                food_name = name_at(rev[i]); i += 1
+                # The addRepeatItem payload carries diary_group in this slot,
+                # but the response does NOT echo it back. Two live experiments:
+                # sent wire 2, read 1; sent wire 4, read 1. It is 1 for every
+                # item created through the API and 0 for one created in the
+                # Cronometer UI, so it behaves like a flag, not a group. Not
+                # reported rather than reported wrong.
+                i += 1
+                repeat_item_id = rev[i]; i += 1
+                food_source_id = rev[i]; i += 1
+                food_id = rev[i]; i += 1
+                i += 1                  # trailing
+                items.append({
+                    "repeat_item_id": repeat_item_id,
+                    "food_name": food_name,
+                    "food_source_id": food_source_id,
+                    "food_id": food_id,
+                    "quantity": quantity,
+                    "days_of_week": days,
+                })
+        except (IndexError, TypeError):
+            return items
 
         return items

@@ -1451,14 +1451,84 @@ class TestParseRepeatedItems:
         result = CronometerClient._parse_repeated_items(self.SAMPLE_RESPONSE)
         assert len(result) == 1
 
+    # Coffee item, which the old heuristic parser got wrong: it scanned for
+    # ints > 10000 and this food's food_source_id is 5828, so it found only
+    # two of the three ids and left repeat_item_id as 0 - making
+    # delete_repeat_item unable to target it.
+    COFFEE_RESPONSE = (
+        '//OK[0,16104,5828,658545,0,4,0,6,3,5,3,4,3,3,3,2,3,1,3,0,3,7,1,12.0,2,1,1,'
+        '["java.util.ArrayList/4159755760",'
+        '"com.cronometer.shared.repeatitems.RepeatItem/477684891",'
+        '"java.lang.Integer/3438268394",'
+        '"Beverages, Coffee, Brewed, Prepared with Tap Water"],0,7]'
+    )
+
     def test_item_fields(self):
+        """Ids verified against live food search, not against the old parser.
+
+        The old test asserted food_source_id == 1055762, which is actually
+        this food's food_id. Searching Cronometer for "Wasa, Crispbread,
+        Multi Grain" returns food_source_id=461776, food_id=1055762.
+        """
         result = CronometerClient._parse_repeated_items(self.SAMPLE_RESPONSE)
         item = result[0]
         assert item["food_name"] == "Wasa, Crispbread, Multi Grain"
-        assert item["food_source_id"] == 1055762
-        assert item["measure_id"] == 461776
+        assert item["food_source_id"] == 461776
+        assert item["food_id"] == 1055762
         assert item["repeat_item_id"] == 658384
         assert item["quantity"] == 3.0
+        assert item["days_of_week"] == [1]
+        # diary_group is deliberately absent: the response does not echo it.
+        assert "diary_group" not in item
+
+    def test_low_food_source_id_still_yields_an_id(self):
+        """Regression: coffee's food_source_id (5828) broke the old heuristic."""
+        item = CronometerClient._parse_repeated_items(self.COFFEE_RESPONSE)[0]
+        assert item["repeat_item_id"] == 658545
+        assert item["food_source_id"] == 5828      # verified via food search
+        assert item["food_id"] == 16104            # verified via food search
+        assert item["quantity"] == 12.0
+        assert item["days_of_week"] == [0, 1, 2, 3, 4, 5, 6]
+
+    # Real two-item response. The second item's day is the GWT back-reference
+    # "-5" (one token, not a type-ref/value pair); miscounting it desynced the
+    # parser and produced food_source_id as the repeat_item_id.
+    TWO_ITEM_RESPONSE = (
+        '//OK[0,66395420,24272784,852756,1,5,0,-5,1,1,2.0,2,0,16104,5828,658545,'
+        '0,4,0,6,3,5,3,4,3,3,3,2,3,1,3,0,3,7,1,12.0,2,2,1,'
+        '["java.util.ArrayList/4159755760",'
+        '"com.cronometer.shared.repeatitems.RepeatItem/477684891",'
+        '"java.lang.Integer/3438268394",'
+        '"Beverages, Coffee, Brewed, Prepared with Tap Water",'
+        '"Safe Catch, Wild Elite Pure Tuna"],0,7]'
+    )
+
+    def test_parses_two_items_with_back_reference(self):
+        items = CronometerClient._parse_repeated_items(self.TWO_ITEM_RESPONSE)
+        assert len(items) == 2
+
+        coffee, tuna = items
+        assert coffee["repeat_item_id"] == 658545
+        assert coffee["food_source_id"] == 5828
+        assert coffee["food_id"] == 16104
+
+        # Ids confirmed live: this item was created with exactly these values
+        # and deleted afterwards using the id parsed here.
+        assert tuna["food_name"] == "Safe Catch, Wild Elite Pure Tuna"
+        assert tuna["repeat_item_id"] == 852756
+        assert tuna["food_source_id"] == 24272784
+        assert tuna["food_id"] == 66395420
+        assert tuna["quantity"] == 2.0
+
+    def test_back_referenced_day_is_none_not_a_guess(self):
+        tuna = CronometerClient._parse_repeated_items(self.TWO_ITEM_RESPONSE)[1]
+        assert tuna["days_of_week"] == [None]
+
+    def test_repeat_item_id_is_never_silently_zero(self):
+        """A zero id is unusable: delete_repeat_item cannot target it."""
+        for raw in (self.SAMPLE_RESPONSE, self.COFFEE_RESPONSE):
+            for item in CronometerClient._parse_repeated_items(raw):
+                assert item["repeat_item_id"], "id must be usable for deletion"
 
     def test_returns_empty_for_invalid(self):
         assert CronometerClient._parse_repeated_items("//EX[err]") == []
