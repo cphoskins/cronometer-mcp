@@ -1,5 +1,7 @@
 """Tests for the Cronometer client (mocked, no credentials needed)."""
 
+from collections import namedtuple
+
 import pytest
 from unittest.mock import patch, MagicMock
 from datetime import date
@@ -40,6 +42,41 @@ class TestClientInit:
         )
         assert c.gwt_permutation == "CUSTOM_PERM"
         assert c.gwt_header == "CUSTOM_HDR"
+
+
+class TestCookieValue:
+    """_cookie_value must survive duplicate cookies of the same name."""
+
+    def test_falls_back_when_get_raises_conflict(self, client):
+        from requests.cookies import CookieConflictError
+
+        jar = MagicMock()
+        jar.get.side_effect = CookieConflictError("multiple cookies")
+        # NB: MagicMock(name=...) sets the mock's own name, not an attribute
+        Cookie = namedtuple("Cookie", "name value")
+        jar.__iter__ = lambda self: iter([
+            Cookie("sesnonce", "old"),
+            Cookie("other", "x"),
+            Cookie("sesnonce", "new"),
+        ])
+        client.session.cookies = jar
+
+        # Most recently set value wins; a raise here previously aborted the
+        # nonce refresh and broke every later GWT call.
+        assert client._cookie_value("sesnonce") == "new"
+
+    def test_uses_get_when_unambiguous(self, client):
+        jar = MagicMock()
+        jar.get.return_value = "plain"
+        client.session.cookies = jar
+        assert client._cookie_value("sesnonce") == "plain"
+
+    def test_returns_none_when_absent(self, client):
+        jar = MagicMock()
+        jar.get.return_value = None
+        jar.__iter__ = lambda self: iter([])
+        client.session.cookies = jar
+        assert client._cookie_value("sesnonce") is None
 
 
 class TestAuthentication:

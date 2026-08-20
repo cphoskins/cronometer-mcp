@@ -19,6 +19,7 @@ from datetime import date
 from pathlib import Path
 
 import requests
+from requests.cookies import CookieConflictError
 
 logger = logging.getLogger(__name__)
 
@@ -413,7 +414,7 @@ class CronometerClient:
             raise RuntimeError(f"Login failed: unexpected response {result}")
 
         # Extract sesnonce cookie
-        self.nonce = self.session.cookies.get("sesnonce")
+        self.nonce = self._cookie_value("sesnonce")
         if not self.nonce:
             raise RuntimeError("Login succeeded but no sesnonce cookie received")
         logger.info("Login successful")
@@ -492,7 +493,7 @@ class CronometerClient:
         self._diary_groups = self._parse_diary_groups(resp.text)
 
         # Update nonce from cookies
-        new_nonce = self.session.cookies.get("sesnonce")
+        new_nonce = self._cookie_value("sesnonce")
         if new_nonce:
             self.nonce = new_nonce
         logger.info("GWT auth successful, user_id=%s", self.user_id)
@@ -533,6 +534,28 @@ class CronometerClient:
         token = match.group(1)
         logger.info("Auth token generated")
         return token
+
+    def _cookie_value(self, name: str) -> str | None:
+        """Read a cookie, tolerating duplicates.
+
+        _save_session() flattens the jar with get_dict(), which drops the
+        domain, so _restore_session() re-adds cookies with domain "". Once the
+        server then sets its own domain-scoped copy, the jar holds two cookies
+        of the same name and requests' cookies.get() raises
+        CookieConflictError.
+
+        That mattered: the raise aborted the session-nonce refresh, leaving a
+        stale nonce behind, and every later GWT call failed with
+        NotLoggedInException. Prefer the most recently set value.
+        """
+        try:
+            value = self.session.cookies.get(name)
+        except CookieConflictError:
+            value = None
+        if value is not None:
+            return value
+        values = [c.value for c in self.session.cookies if c.name == name]
+        return values[-1] if values else None
 
     def _save_session(self) -> None:
         """Persist session cookies and auth state to disk."""
@@ -1007,7 +1030,7 @@ class CronometerClient:
         # This call rotates the session nonce server-side. Without picking the
         # new one up, self.nonce goes stale and the next GWT write fails with
         # NotLoggedInException even though the session is perfectly alive.
-        new_nonce = self.session.cookies.get("sesnonce")
+        new_nonce = self._cookie_value("sesnonce")
         if new_nonce:
             self.nonce = new_nonce
 

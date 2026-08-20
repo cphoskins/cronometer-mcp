@@ -229,3 +229,64 @@ class TestTimeOfDayDefault:
         import cronometer_mcp.server as server
         monkeypatch.setattr(server, "_default_group_name", lambda: "breakfast")
         assert _resolve_diary_group(_client_with(DEFAULT_ACCOUNT), "") == (1, None)
+
+
+class TestAddRepeatItemWiring:
+    """add_repeat_item shares the resolver with add_food_entry.
+
+    Exercised with a mock rather than live: get_repeated_items currently
+    parses repeat_item_id as 0, so delete_repeat_item cannot remove a
+    created item, and a repeat item recurs every day. Not worth creating
+    one that cannot be cleaned up.
+    """
+
+    def _patched(self, monkeypatch, settings=TEST_ACCOUNT):
+        import cronometer_mcp.server as server
+        client = _client_with(settings)
+        client.add_repeat_item = MagicMock(return_value=True)
+        monkeypatch.setattr(server, "_get_client", lambda: client)
+        return server, client
+
+    def test_resolves_custom_group_name_to_wire_index(self, monkeypatch):
+        server, client = self._patched(monkeypatch)
+
+        result = json.loads(server.add_repeat_item(
+            food_source_id=1, food_id=2, quantity=1, food_name="X",
+            diary_group="Test",
+        ))
+
+        assert result["status"] == "success"
+        assert client.add_repeat_item.call_args[1]["diary_group"] == 0
+
+    def test_rejects_unknown_group_without_writing(self, monkeypatch):
+        server, client = self._patched(monkeypatch)
+
+        result = json.loads(server.add_repeat_item(
+            food_source_id=1, food_id=2, quantity=1, food_name="X",
+            diary_group="Elevenses",
+        ))
+
+        assert result["status"] == "error"
+        client.add_repeat_item.assert_not_called()
+
+    def test_rejects_disabled_group_without_writing(self, monkeypatch):
+        server, client = self._patched(monkeypatch)
+
+        result = json.loads(server.add_repeat_item(
+            food_source_id=1, food_id=2, quantity=1, food_name="X",
+            diary_group="Group 7",
+        ))
+
+        assert result["status"] == "error"
+        client.add_repeat_item.assert_not_called()
+
+    def test_renamed_account_rejects_assumed_breakfast(self, monkeypatch):
+        server, client = self._patched(monkeypatch, RENAMED_ACCOUNT)
+
+        result = json.loads(server.add_repeat_item(
+            food_source_id=1, food_id=2, quantity=1, food_name="X",
+            diary_group="Breakfast",
+        ))
+
+        assert result["status"] == "error"
+        client.add_repeat_item.assert_not_called()
