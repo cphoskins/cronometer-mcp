@@ -6,12 +6,12 @@
     "url": "https://github.com/cphoskins/cronometer-mcp",
     "source": "github"
   },
-  "version": "2.1.1",
+  "version": "2.1.2",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "cronometer-mcp",
-      "version": "2.1.1",
+      "version": "2.1.2",
       "transport": {
         "type": "stdio"
       },
