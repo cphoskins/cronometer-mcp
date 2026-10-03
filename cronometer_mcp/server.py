@@ -26,6 +26,21 @@ mcp = MCPServer(
     ),
 )
 
+# CRONOMETER_READ_ONLY=1 leaves every tool that changes the Cronometer account
+# unregistered, so a client never sees them. The credentials still have full
+# access; this limits what the server exposes, not what the login can do.
+READ_ONLY = os.environ.get("CRONOMETER_READ_ONLY", "").strip().lower() in (
+    "1", "true", "yes",
+)
+if READ_ONLY:
+    logger.info("Read-only mode: tools that change Cronometer data are disabled")
+
+
+def _write_tool(fn):
+    """Register a tool that changes Cronometer data, unless read-only."""
+    return fn if READ_ONLY else mcp.tool()(fn)
+
+
 _client: CronometerClient | None = None
 
 
@@ -482,7 +497,7 @@ def get_food_details(food_source_id: int) -> str:
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_write_tool
 def add_food_entry(
     food_id: int,
     food_source_id: int,
@@ -549,7 +564,7 @@ def add_food_entry(
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_write_tool
 def remove_food_entry(serving_id: str) -> str:
     """Remove a food entry from the Cronometer diary.
 
@@ -605,7 +620,7 @@ def get_macro_targets(
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_write_tool
 def set_macro_targets(
     protein_grams: float | None = None,
     fat_grams: float | None = None,
@@ -685,7 +700,7 @@ _DOW_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday",
               "Thursday", "Friday", "Saturday"]
 
 
-@mcp.tool()
+@_write_tool
 def set_weekly_macro_schedule(
     template_name: str,
     days: str = "all",
@@ -779,7 +794,7 @@ def list_macro_templates() -> str:
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_write_tool
 def create_macro_template(
     template_name: str,
     protein_grams: float,
@@ -908,7 +923,7 @@ def get_fasting_stats() -> str:
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_write_tool
 def delete_fast(fast_id: int) -> str:
     """Delete a fast entry from Cronometer.
 
@@ -929,7 +944,7 @@ def delete_fast(fast_id: int) -> str:
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_write_tool
 def cancel_active_fast(fast_id: int) -> str:
     """Cancel an active (in-progress) fast while preserving the recurring schedule.
 
@@ -969,7 +984,7 @@ def get_recent_biometrics() -> str:
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_write_tool
 def add_biometric(
     metric_type: str,
     value: float,
@@ -1007,7 +1022,7 @@ def add_biometric(
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_write_tool
 def remove_biometric(biometric_id: str) -> str:
     """Remove a biometric entry from Cronometer.
 
@@ -1113,7 +1128,7 @@ def sync_cronometer(
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_write_tool
 def copy_day(source_date: str, destination_date: str) -> str:
     """Copy all diary entries from one date to another.
 
@@ -1141,7 +1156,7 @@ def copy_day(source_date: str, destination_date: str) -> str:
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_write_tool
 def set_day_complete(date: str, complete: bool = True) -> str:
     """Mark a diary day as complete or incomplete.
 
@@ -1185,7 +1200,7 @@ def get_repeated_items() -> str:
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_write_tool
 def add_repeat_item(
     food_id: int,
     food_source_id: int,
@@ -1252,7 +1267,7 @@ def add_repeat_item(
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_write_tool
 def delete_repeat_item(repeat_item_id: int) -> str:
     """Delete a recurring food entry.
 
