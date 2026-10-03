@@ -9,6 +9,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
 from cronometer_mcp.client import CronometerClient
 from cronometer_mcp.server import _resolve_diary_group
@@ -134,6 +135,20 @@ class TestDiaryGroupsFallback:
         assert [(g["wire_index"], g["name"]) for g in groups] == [
             (1, "Breakfast"), (2, "Lunch"), (3, "Dinner"), (4, "Snacks")
         ]
+
+    def test_fetch_failure_raises_instead_of_falling_back(self, monkeypatch):
+        """A timeout is not a parse regression: on a customised account the
+        defaults would route writes to the wrong group."""
+        c = CronometerClient(username="u", password="p")
+        monkeypatch.setattr(c, "authenticate", lambda: None)
+
+        def timeout():
+            raise requests.Timeout("timed out")
+        monkeypatch.setattr(c, "_fetch_diary_groups", timeout)
+
+        with pytest.raises(requests.Timeout):
+            c.diary_groups
+        assert c._diary_groups is None  # not cached; the next call retries
 
 
 def _client_with(settings: dict[str, str]):

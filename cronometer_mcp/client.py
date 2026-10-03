@@ -1188,15 +1188,14 @@ class CronometerClient:
 
         Falls back to the four default meals at wire 1-4 if nothing could be
         parsed, so a parse regression degrades to the legacy behavior rather
-        than blocking every write.
+        than blocking every write. A failed fetch (timeout, dead session) is
+        not a parse regression: it raises and is retried on the next access,
+        since the defaults would send writes to the wrong group on an account
+        with custom groups.
         """
         self.authenticate()
         if self._diary_groups is None:
-            try:
-                self._diary_groups = self._fetch_diary_groups()
-            except Exception:
-                logger.warning("Could not fetch diary groups", exc_info=True)
-                self._diary_groups = []
+            self._diary_groups = self._fetch_diary_groups()
         if not self._diary_groups:
             return [
                 {"wire_index": i, "settings_key": f"DG{i + 1:02d}",
