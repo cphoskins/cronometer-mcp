@@ -1123,6 +1123,30 @@ class TestSessionExpiryRecovery:
         assert "new-nonce" in retry_body
         assert "old-nonce" not in retry_body
 
+    def test_nonce_swap_leaves_user_text_alone(self, tmp_path):
+        """Only the pipe-delimited nonce field is swapped, not lookalike text."""
+        c = self._make_client(tmp_path)
+        c.session.post = MagicMock(
+            side_effect=[self._resp(NOT_LOGGED_IN), self._resp("//OK[[],0,7]")]
+        )
+        with self._fake_login(c):
+            c._gwt_post("7|0|4|HDR456|old-nonce|Plan old-nonce trial|1|2|")
+        retry_body = c.session.post.call_args_list[1][1]["data"]
+        assert retry_body == "7|0|4|HDR456|new-nonce|Plan old-nonce trial|1|2|"
+
+    def test_diary_group_fetch_recovers(self, tmp_path):
+        """A dead session must not degrade custom groups to the defaults."""
+        from tests.test_diary_groups import RENAMED_ACCOUNT, build_settings_response
+
+        c = self._make_client(tmp_path)
+        c.session.post = MagicMock(side_effect=[
+            self._resp(NOT_LOGGED_IN),
+            self._resp(build_settings_response(RENAMED_ACCOUNT)),
+        ])
+        with self._fake_login(c):
+            groups = c.diary_groups
+        assert [g["name"] for g in groups][:2] == ["Data", "Morning Fluids"]
+
     def test_gwt_call_retries_only_once(self, tmp_path):
         c = self._make_client(tmp_path)
         c.session.post = MagicMock(return_value=self._resp(NOT_LOGGED_IN))

@@ -807,8 +807,11 @@ class CronometerClient:
         Raises RuntimeError if the response does not start with '//OK'.
         A NotLoggedInException triggers one fresh login and one retry. Callers
         bake self.nonce into the body, so the retry swaps in the new nonce;
-        resending the dead one would just be rejected again.
+        resending the dead one would just be rejected again. The nonce is its
+        own pipe-delimited field, so match it whole: user text (a template
+        name, say) may not be rewritten.
         """
+        sent_nonce = self.nonce
         for attempt in range(2):
             resp = self.session.post(
                 GWT_BASE_URL,
@@ -824,10 +827,9 @@ class CronometerClient:
                 return resp.text
             if attempt or "NotLoggedInException" not in resp.text:
                 break
-            stale_nonce = self.nonce
             self._reauthenticate()
-            if stale_nonce:
-                body = body.replace(stale_nonce, self.nonce)
+            if sent_nonce:
+                body = body.replace(f"|{sent_nonce}|", f"|{self.nonce}|", 1)
         raise RuntimeError(
             f"GWT-RPC call failed. Response: {resp.text[:300]}"
         )
@@ -1150,16 +1152,10 @@ class CronometerClient:
     def _fetch_diary_groups(self) -> list[dict]:
         """Re-issue authenticate() purely to read the settings map."""
         body = GWT_AUTHENTICATE.replace("{gwt_header}", self.gwt_header)
-        resp = self.session.post(
-            GWT_BASE_URL,
-            data=body,
-            headers={
-                "content-type": DEFAULT_GWT_CONTENT_TYPE,
-                "x-gwt-module-base": DEFAULT_GWT_MODULE_BASE,
-                "x-gwt-permutation": self.gwt_permutation,
-            },
-        )
-        resp.raise_for_status()
+        # Through _gwt_post so a dead session is re-established; parsed
+        # directly, its //EX payload reads as "no groups" and the account's
+        # custom groups silently fall back to the defaults.
+        raw = self._gwt_post(body)
 
         # This call rotates the session nonce server-side. Without picking the
         # new one up, self.nonce goes stale and the next GWT write fails with
@@ -1168,7 +1164,7 @@ class CronometerClient:
         if new_nonce:
             self.nonce = new_nonce
 
-        return self._parse_diary_groups(resp.text)
+        return self._parse_diary_groups(raw)
 
     @property
     def diary_groups(self) -> list[dict]:
