@@ -351,6 +351,10 @@ EXPORT_TYPES = {
 }
 
 
+class SessionExpiredError(RuntimeError):
+    """Cronometer rejected the session (expired or logged out server-side)."""
+
+
 class CronometerClient:
     """Client for the Cronometer GWT-RPC API.
 
@@ -522,7 +526,7 @@ class CronometerClient:
         # "token", so _restore_session() would treat a dead session as valid and
         # every later export would 403. Reject //EX before parsing.
         if resp.text.lstrip().startswith("//EX"):
-            raise RuntimeError(
+            raise SessionExpiredError(
                 f"Session rejected while generating auth token: {resp.text[:200]}"
             )
 
@@ -591,16 +595,33 @@ class CronometerClient:
         except Exception:
             pass
 
-        # Drop the dead cookies as well as the pickle. Leaving them on the
-        # session poisons the fresh login that follows: Cronometer serves
-        # /login/ differently to a request carrying a stale session cookie, and
-        # the anti-CSRF token is missing from that variant.
+        self._discard_session()
+        return False
+
+    def _discard_session(self) -> None:
+        """Forget a dead session: cookies, auth state and the saved pickle.
+
+        Drop the dead cookies as well as the pickle. Leaving them on the
+        session poisons the fresh login that follows: Cronometer serves
+        /login/ differently to a request carrying a stale session cookie, and
+        the anti-CSRF token is missing from that variant.
+        """
         self.session.cookies.clear()
         self.nonce = None
         self.user_id = None
         self._diary_groups = None
         self._cookie_path.unlink(missing_ok=True)
-        return False
+
+    def _reauthenticate(self) -> None:
+        """Replace a session that died mid-process with a fresh login.
+
+        authenticate() caches success for the life of the process, so without
+        this a session expiring server-side breaks every call until restart.
+        """
+        logger.info("Session expired; logging in again")
+        self._authenticated = False
+        self._discard_session()
+        self.authenticate()
 
     def authenticate(self) -> None:
         """Full authentication flow: discover hashes, login, GWT auth."""
@@ -634,7 +655,11 @@ class CronometerClient:
             Raw CSV text.
         """
         self.authenticate()
-        token = self._generate_auth_token()
+        try:
+            token = self._generate_auth_token()
+        except SessionExpiredError:
+            self._reauthenticate()
+            token = self._generate_auth_token()
 
         if start is None:
             start = date.today()
@@ -685,22 +710,32 @@ class CronometerClient:
         """POST a GWT-RPC payload and return the raw response text.
 
         Raises RuntimeError if the response does not start with '//OK'.
+        A NotLoggedInException triggers one fresh login and one retry. Callers
+        bake self.nonce into the body, so the retry swaps in the new nonce;
+        resending the dead one would just be rejected again.
         """
-        resp = self.session.post(
-            GWT_BASE_URL,
-            data=body,
-            headers={
-                "content-type": DEFAULT_GWT_CONTENT_TYPE,
-                "x-gwt-module-base": DEFAULT_GWT_MODULE_BASE,
-                "x-gwt-permutation": self.gwt_permutation,
-            },
-        )
-        resp.raise_for_status()
-        if not resp.text.startswith("//OK"):
-            raise RuntimeError(
-                f"GWT-RPC call failed. Response: {resp.text[:300]}"
+        for attempt in range(2):
+            resp = self.session.post(
+                GWT_BASE_URL,
+                data=body,
+                headers={
+                    "content-type": DEFAULT_GWT_CONTENT_TYPE,
+                    "x-gwt-module-base": DEFAULT_GWT_MODULE_BASE,
+                    "x-gwt-permutation": self.gwt_permutation,
+                },
             )
-        return resp.text
+            resp.raise_for_status()
+            if resp.text.startswith("//OK"):
+                return resp.text
+            if attempt or "NotLoggedInException" not in resp.text:
+                break
+            stale_nonce = self.nonce
+            self._reauthenticate()
+            if stale_nonce:
+                body = body.replace(stale_nonce, self.nonce)
+        raise RuntimeError(
+            f"GWT-RPC call failed. Response: {resp.text[:300]}"
+        )
 
     @staticmethod
     def _parse_find_foods(raw: str) -> list[dict]:
@@ -911,19 +946,23 @@ class CronometerClient:
             call is no longer needed just to resolve food_id.
         """
         self.authenticate()
-        resp = self.session.get(
-            FOOD_SEARCH_URL.format(user_id=self.user_id),
-            params={
-                "query": query.upper(),
-                "maxResults": max_results,
-                "sources": "All",
-                "categoryId": 0,
-                "selectedTab": "ALL",
-                "type": "All",
-            },
-        )
-        resp.raise_for_status()
-        return [self._map_search_hit(hit) for hit in resp.json()]
+        for attempt in range(2):
+            resp = self.session.get(
+                FOOD_SEARCH_URL.format(user_id=self.user_id),
+                params={
+                    "query": query.upper(),
+                    "maxResults": max_results,
+                    "sources": "All",
+                    "categoryId": 0,
+                    "selectedTab": "ALL",
+                    "type": "All",
+                },
+            )
+            if resp.status_code in (401, 403) and not attempt:
+                self._reauthenticate()
+                continue
+            resp.raise_for_status()
+            return [self._map_search_hit(hit) for hit in resp.json()]
 
     @staticmethod
     def _map_search_hit(hit: dict) -> dict:

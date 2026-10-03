@@ -3,6 +3,7 @@
 from collections import namedtuple
 
 import pytest
+import requests
 from unittest.mock import patch, MagicMock
 from datetime import date
 
@@ -1076,6 +1077,112 @@ class TestSessionPersistence:
 
         assert restored is False
         assert not cookie_path.exists()
+
+
+NOT_LOGGED_IN = (
+    '//EX[2,1,["com.cronometer.shared.user.exceptions.NotLoggedInException/844385496",'
+    '"Invalid or expired session"],0,7]'
+)
+
+
+class TestSessionExpiryRecovery:
+    """A session that dies mid-process is replaced by one fresh login."""
+
+    def _make_client(self, tmp_path):
+        c = CronometerClient(username="test@x.com", password="pw")
+        c._cookie_path = tmp_path / ".session_cookies"
+        c._authenticated = True
+        c.nonce = "old-nonce"
+        c.user_id = "12345"
+        c.gwt_header = "HDR456"
+        return c
+
+    def _fake_login(self, c):
+        """Stand in for the network login; only a real re-login mints a new nonce."""
+        def authenticate():
+            if not c._authenticated:
+                c.nonce = "new-nonce"
+                c._authenticated = True
+        return patch.object(c, "authenticate", side_effect=authenticate)
+
+    def _resp(self, text="", status=200, json=None):
+        resp = MagicMock(text=text, status_code=status)
+        resp.json.return_value = json
+        if status >= 400:
+            resp.raise_for_status.side_effect = requests.HTTPError(f"{status} Error")
+        return resp
+
+    def test_gwt_call_retries_with_fresh_nonce(self, tmp_path):
+        c = self._make_client(tmp_path)
+        c.session.post = MagicMock(
+            side_effect=[self._resp(NOT_LOGGED_IN), self._resp("//OK[[],0,7]")]
+        )
+        with self._fake_login(c):
+            assert c.remove_serving("D80lp$") is True
+        retry_body = c.session.post.call_args_list[1][1]["data"]
+        assert "new-nonce" in retry_body
+        assert "old-nonce" not in retry_body
+
+    def test_gwt_call_retries_only_once(self, tmp_path):
+        c = self._make_client(tmp_path)
+        c.session.post = MagicMock(return_value=self._resp(NOT_LOGGED_IN))
+        with self._fake_login(c):
+            with pytest.raises(RuntimeError, match="GWT-RPC call failed"):
+                c.remove_serving("D80lp$")
+        assert c.session.post.call_count == 2
+
+    def test_gwt_other_errors_do_not_relogin(self, tmp_path):
+        c = self._make_client(tmp_path)
+        c.session.post = MagicMock(return_value=self._resp("//EX[not found]"))
+        with self._fake_login(c) as login:
+            with pytest.raises(RuntimeError, match="GWT-RPC call failed"):
+                c.remove_serving("D80lp$")
+        assert c.session.post.call_count == 1
+        assert c.nonce == "old-nonce"
+        login.assert_called_once()  # the caller's own authenticate(), no re-login
+
+    def test_export_recovers_from_rejected_token(self, tmp_path):
+        c = self._make_client(tmp_path)
+        c.session.post = MagicMock(
+            side_effect=[self._resp(NOT_LOGGED_IN), self._resp('//OK[1,["tok123"],0,7]')]
+        )
+        c.session.get = MagicMock(return_value=self._resp("Date,Energy\n"))
+        with self._fake_login(c):
+            assert c.export_raw("daily_summary") == "Date,Energy\n"
+        assert "new-nonce" in c.session.post.call_args_list[1][1]["data"]
+        assert c.session.get.call_args[1]["params"]["nonce"] == "tok123"
+
+    def test_food_search_recovers_from_401(self, tmp_path):
+        c = self._make_client(tmp_path)
+        hit = {"id": 451621, "measureId": 1003369, "name": "Raspberry, Fresh"}
+        c.session.get = MagicMock(
+            side_effect=[self._resp(status=401), self._resp(json=[hit])]
+        )
+        with self._fake_login(c):
+            results = c.find_foods("raspberry")
+        assert results[0]["food_source_id"] == 451621
+        assert c.session.get.call_count == 2
+
+    def test_food_search_retries_only_once(self, tmp_path):
+        c = self._make_client(tmp_path)
+        c.session.get = MagicMock(return_value=self._resp(status=401))
+        with self._fake_login(c):
+            with pytest.raises(requests.HTTPError):
+                c.find_foods("raspberry")
+        assert c.session.get.call_count == 2
+
+    def test_relogin_discards_stale_state(self, tmp_path):
+        c = self._make_client(tmp_path)
+        c.session.cookies.set("sesnonce", "old-nonce")
+        c._cookie_path.write_bytes(b"stale")
+        c._diary_groups = [{"wire_index": 1}]
+        with patch.object(c, "authenticate") as login:
+            c._reauthenticate()
+        login.assert_called_once()
+        assert c._authenticated is False
+        assert len(c.session.cookies) == 0
+        assert c._diary_groups is None
+        assert not c._cookie_path.exists()
 
 
 # ── Macro Target Tests ──────────────────────────────────────────────────
