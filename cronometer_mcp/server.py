@@ -576,6 +576,7 @@ def get_macro_targets(
 
     Returns the effective macro targets (protein, fat, carbs, calories)
     and the template name for a specific date or all days of the week.
+    A macro with no target set in Cronometer is null.
 
     Args:
         target_date: Date as YYYY-MM-DD to get targets for (defaults to today).
@@ -640,6 +641,24 @@ def set_macro_targets(
         new_carbs = carbs_grams if carbs_grams is not None else current["carbs_g"]
         new_calories = calories if calories is not None else current["calories"]
         name = template_name or "Custom Targets"
+
+        # A macro with no target in Cronometer reads as None. Writing it back
+        # would mean inventing a value, so ask for it instead.
+        unset = [
+            label for label, value in (
+                ("protein_grams", new_protein), ("fat_grams", new_fat),
+                ("carbs_grams", new_carbs), ("calories", new_calories),
+            ) if value is None
+        ]
+        if unset:
+            return json.dumps({
+                "status": "error",
+                "message": (
+                    f"No current target for {', '.join(unset)} on {day}; "
+                    "pass explicit values for them."
+                ),
+                "current": current,
+            }, indent=2)
 
         client.update_daily_targets(
             day=day,

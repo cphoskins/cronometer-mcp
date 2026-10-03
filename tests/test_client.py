@@ -1188,17 +1188,31 @@ class TestSessionExpiryRecovery:
 # ── Macro Target Tests ──────────────────────────────────────────────────
 
 
+_DAILY_TEMPLATE_TYPES = (
+    '["com.cronometer.shared.targets.models.MacroTargetTemplate/3691130822",'
+    '"java.lang.Boolean/476441737",'
+    '"java.lang.Double/858496421",'
+    '"com.cronometer.shared.entries.models.Day/782579793",'
+    '"java.lang.Integer/3438268394",'
+)
+
+
 class TestParseMacroTargetTemplate:
-    """Tests for _parse_macro_target_template static parser."""
+    """Tests for _parse_macro_target_template static parser.
+
+    Fixtures follow the live wire layout; values in templates not already
+    public in this repo are altered.
+    """
 
     SAMPLE_RESPONSE = (
-        '//OK[0,155.0,7,0,0,124947,8,1,0,85.0,7,1970.0,7,0,0,12.0,7,6,5,4,3,2,1,'
-        '["java.util.ArrayList/4159755760",'
-        '"com.cronometer.shared.targets.models.MacroTargetTemplate/3691130822",'
-        '"java.lang.Boolean/476441737",'
-        '"java.lang.Double/858496421",'
-        '"com.cronometer.shared.entries.models.Day/782579793",'
-        '"Keto Rigorous"],0,7]'
+        '//OK[0,155.0,3,6,0,0,124947,5,1,0,85.0,3,1970.0,3,2026,3,7,4,0,12.0,3,0,2,1,'
+        + _DAILY_TEMPLATE_TYPES + '"Keto Rigorous"],0,7]'
+    )
+
+    # A template with no calorie target: the slot is a bare null (0).
+    NULL_CALORIES = (
+        '//OK[0,150.0,3,6,0,0,109110,5,1,0,70.0,3,0,2025,11,29,4,0,40.0,3,0,2,1,'
+        + _DAILY_TEMPLATE_TYPES + '"Fast Day"],0,7]'
     )
 
     def test_parses_macro_values(self):
@@ -1212,38 +1226,49 @@ class TestParseMacroTargetTemplate:
         result = CronometerClient._parse_macro_target_template(self.SAMPLE_RESPONSE)
         assert result["template_name"] == "Keto Rigorous"
 
-    def test_returns_defaults_for_invalid_response(self):
-        result = CronometerClient._parse_macro_target_template("//EX[error]")
-        assert result["protein_g"] == 0.0
-        assert result["template_name"] == ""
+    def test_unset_macro_is_none_not_zero(self):
+        """Issue #5: one unset macro used to zero out all four."""
+        result = CronometerClient._parse_macro_target_template(self.NULL_CALORIES)
+        assert result == {
+            "protein_g": 150.0,
+            "fat_g": 70.0,
+            "calories": None,
+            "carbs_g": 40.0,
+            "template_name": "Fast Day",
+        }
 
-    def test_returns_defaults_for_empty_ok(self):
-        result = CronometerClient._parse_macro_target_template("//OK[[],0,7]")
-        assert result["protein_g"] == 0.0
+    def test_rejects_error_response(self):
+        with pytest.raises(ValueError, match="Could not parse"):
+            CronometerClient._parse_macro_target_template("//EX[error]")
+
+    def test_rejects_unexpected_shape(self):
+        with pytest.raises(ValueError, match="Could not parse"):
+            CronometerClient._parse_macro_target_template("//OK[[],0,7]")
 
 
 class TestParseAllMacroSchedules:
     """Tests for _parse_all_macro_schedules static parser."""
 
-    # Captured from live Cronometer (all 7 days = "Keto Rigorous")
+    # Captured from live Cronometer (all 7 days = "Retatrutide GI-Optimized").
+    # One MacroSchedule per line; GWT reads the stream from the end.
     SAMPLE_RESPONSE = (
-        '//OK[0,155.0,7,9,0,0,124947,8,1,0,85.0,7,1970.0,7,0,0,12.0,7,-6,5,6,4,3,2,'
-        '0,155.0,7,9,0,0,124947,8,1,0,85.0,7,1970.0,7,0,0,12.0,7,-6,5,6,-4,-3,1,'
-        '0,155.0,7,9,0,0,124947,8,1,0,85.0,7,1970.0,7,0,0,12.0,7,-6,5,6,-4,-3,2,'
-        '0,155.0,7,9,0,0,124947,8,1,0,85.0,7,1970.0,7,0,0,12.0,7,-6,5,6,-4,-3,3,'
-        '0,155.0,7,9,0,0,124947,8,1,0,85.0,7,1970.0,7,0,0,12.0,7,-6,5,6,-4,-3,4,'
-        '0,155.0,7,9,0,0,124947,8,1,0,85.0,7,1970.0,7,0,0,12.0,7,-6,5,6,-4,-3,5,'
-        '0,155.0,7,9,0,0,124947,8,1,0,85.0,7,1970.0,7,0,0,12.0,7,-6,5,6,-4,-3,6,'
+        '//OK[0,190.0,7,9,0,0,141154,8,0,0,80.0,7,1800.0,7,0,0,80.0,7,-6,5,6,4,3,2,'
+        '0,190.0,7,9,0,0,141154,8,0,0,80.0,7,1800.0,7,0,0,80.0,7,-6,5,5,4,3,2,'
+        '0,190.0,7,9,0,0,141154,8,0,0,80.0,7,1800.0,7,0,0,80.0,7,-6,5,4,4,3,2,'
+        '0,190.0,7,9,0,0,141154,8,0,0,80.0,7,1800.0,7,0,0,80.0,7,-6,5,3,4,3,2,'
+        '0,190.0,7,9,0,0,141154,8,0,0,80.0,7,1800.0,7,0,0,80.0,7,-6,5,2,4,3,2,'
+        '0,190.0,7,9,0,0,141154,8,0,0,80.0,7,1800.0,7,0,0,80.0,7,-6,5,1,4,3,2,'
+        '0,190.0,7,9,0,0,141154,8,0,0,80.0,7,1800.0,7,0,0,80.0,7,0,6,5,0,4,3,2,'
         '7,1,'
         '["java.util.ArrayList/4159755760",'
-        '"com.cronometer.shared.targets.models.MacroSchedule/965693762",'
+        '"com.cronometer.shared.targets.models.MacroSchedule/1128420842",'
+        '"com.cronometer.shared.targets.DayOfWeek/913617675",'
+        '"com.cronometer.shared.targets.DayOfWeek$DayOfWeekEnum/3974900421",'
         '"com.cronometer.shared.targets.models.MacroTargetTemplate/3691130822",'
-        '"com.cronometer.shared.targets.models.DayOfWeek/487453263",'
-        '"com.cronometer.shared.targets.models.DayOfWeekEnum/1545088503",'
-        '"Keto Rigorous",'
         '"java.lang.Boolean/476441737",'
         '"java.lang.Double/858496421",'
-        '"com.cronometer.shared.entries.models.Day/782579793"],0,7]'
+        '"java.lang.Integer/3438268394",'
+        '"Retatrutide GI-Optimized"],0,7]'
     )
 
     def test_returns_7_entries(self):
@@ -1266,27 +1291,29 @@ class TestParseAllMacroSchedules:
     def test_macro_values(self):
         schedules = CronometerClient._parse_all_macro_schedules(self.SAMPLE_RESPONSE)
         for s in schedules:
-            assert s["protein_g"] == 155.0
-            assert s["fat_g"] == 85.0
-            assert s["calories"] == 1970.0
-            assert s["carbs_g"] == 12.0
+            assert s["protein_g"] == 190.0
+            assert s["fat_g"] == 80.0
+            assert s["calories"] == 1800.0
+            assert s["carbs_g"] == 80.0
 
     def test_template_name(self):
         schedules = CronometerClient._parse_all_macro_schedules(self.SAMPLE_RESPONSE)
         for s in schedules:
-            assert s["template_name"] == "Keto Rigorous"
+            assert s["template_name"] == "Retatrutide GI-Optimized"
 
     def test_template_id(self):
         schedules = CronometerClient._parse_all_macro_schedules(self.SAMPLE_RESPONSE)
         for s in schedules:
-            assert s["template_id"] == 124947
+            assert s["template_id"] == 141154
 
-    def test_returns_empty_for_invalid_response(self):
-        assert CronometerClient._parse_all_macro_schedules("//EX[error]") == []
+    def test_rejects_error_response(self):
+        with pytest.raises(ValueError, match="Could not parse"):
+            CronometerClient._parse_all_macro_schedules("//EX[error]")
 
-    def test_returns_empty_for_missing_type(self):
+    def test_rejects_unexpected_shape(self):
         raw = '//OK[1,2,3,["java.util.ArrayList/4159755760"],0,7]'
-        assert CronometerClient._parse_all_macro_schedules(raw) == []
+        with pytest.raises(ValueError, match="Could not parse"):
+            CronometerClient._parse_all_macro_schedules(raw)
 
 
 class TestGetDailyMacroTargets:
@@ -1304,13 +1331,8 @@ class TestGetDailyMacroTargets:
     def test_calls_gwt_post_with_date(self):
         c = self._make_client()
         resp = (
-            '//OK[0,180.0,7,0,0,99999,8,1,0,100.0,7,2200.0,7,0,0,50.0,7,6,5,4,3,2,1,'
-            '["java.util.ArrayList/4159755760",'
-            '"com.cronometer.shared.targets.models.MacroTargetTemplate/3691130822",'
-            '"java.lang.Boolean/476441737",'
-            '"java.lang.Double/858496421",'
-            '"com.cronometer.shared.entries.models.Day/782579793",'
-            '"Custom"],0,7]'
+            '//OK[0,180.0,3,6,0,0,99999,5,1,0,100.0,3,2200.0,3,2026,3,8,4,0,50.0,3,0,2,1,'
+            + _DAILY_TEMPLATE_TYPES + '"Custom"],0,7]'
         )
         c.session.post = MagicMock(
             return_value=MagicMock(text=resp, raise_for_status=lambda: None)
@@ -1329,7 +1351,7 @@ class TestGetDailyMacroTargets:
 
     def test_defaults_to_today(self):
         c = self._make_client()
-        resp = '//OK[0,155.0,7,0,0,1,8,1,0,85.0,7,1970.0,7,0,0,12.0,7,6,5,4,3,2,1,["java.util.ArrayList/4159755760","com.cronometer.shared.targets.models.MacroTargetTemplate/3691130822","java.lang.Boolean/476441737","java.lang.Double/858496421","com.cronometer.shared.entries.models.Day/782579793","Keto"],0,7]'
+        resp = TestParseMacroTargetTemplate.SAMPLE_RESPONSE
         c.session.post = MagicMock(
             return_value=MagicMock(text=resp, raise_for_status=lambda: None)
         )
@@ -1403,45 +1425,70 @@ class TestUpdateDailyTargets:
 class TestParseMacroTargetTemplates:
     """Tests for _parse_macro_target_templates static parser."""
 
+    # Live wire layout, one template per line (GWT reads from the end, so the
+    # last line is the first template). Values in templates not already public
+    # in this repo are altered. Fast Day and Feast Day have no calorie target;
+    # Ratio Plan has only carbs and protein.
     SAMPLE_RESPONSE = (
-        '//OK[0,190.0,7,0,0,141154,8,1,0,80.0,7,1800.0,7,0,0,80.0,7,6,5,4,3,2,1,'
+        '//OK[0,190.0,4,11,0,0,141154,5,0,0,80.0,4,1800.0,4,0,0,80.0,4,-3,2,'
+        '0,155.0,4,10,0,0,124947,5,1,0,85.0,4,1970.0,4,0,0,12.0,4,-3,2,'
+        '0,150.0,4,9,0,0,109110,5,1,0,70.0,4,0,0,0,40.0,4,-3,2,'
+        '0,160.0,4,8,0,0,109109,5,1,0,120.0,4,0,0,0,220.0,4,-3,2,'
+        '0,1.0,4,7,5,6,47492,5,0,0,0,0,0,0,25.0,4,0,3,2,'
+        '5,1,'
         '["java.util.ArrayList/4159755760",'
         '"com.cronometer.shared.targets.models.MacroTargetTemplate/3691130822",'
         '"java.lang.Boolean/476441737",'
         '"java.lang.Double/858496421",'
-        '"com.cronometer.shared.entries.models.Day/782579793",'
+        '"java.lang.Integer/3438268394",'
+        '"Rigorous",'
+        '"Ratio Plan",'
+        '"Feast Day",'
+        '"Fast Day",'
+        '"Keto Rigorous",'
         '"Retatrutide GI-Optimized"],0,7]'
     )
 
-    def test_parses_single_template(self):
+    def test_parses_every_template(self):
+        """Templates with unset macros used to be dropped or shifted."""
         result = CronometerClient._parse_macro_target_templates(self.SAMPLE_RESPONSE)
-        assert len(result) == 1
+        assert [t["template_name"] for t in result] == [
+            "Ratio Plan", "Feast Day", "Fast Day",
+            "Keto Rigorous", "Retatrutide GI-Optimized",
+        ]
 
     def test_template_macro_values(self):
         result = CronometerClient._parse_macro_target_templates(self.SAMPLE_RESPONSE)
-        t = result[0]
-        assert t["protein_g"] == 190.0
-        assert t["fat_g"] == 80.0
-        assert t["calories"] == 1800.0
-        assert t["carbs_g"] == 80.0
-        assert t["template_name"] == "Retatrutide GI-Optimized"
+        assert result[3] == {
+            "template_id": 124947,
+            "template_name": "Keto Rigorous",
+            "protein_g": 155.0,
+            "fat_g": 85.0,
+            "calories": 1970.0,
+            "carbs_g": 12.0,
+        }
 
-    def test_template_id_is_large_int(self):
-        """Template ID should be the largest int > string table size in the block."""
+    def test_unset_macros_are_none_and_do_not_shift(self):
         result = CronometerClient._parse_macro_target_templates(self.SAMPLE_RESPONSE)
-        t = result[0]
-        # The parser picks the first int > len(string_table) which may be
-        # a small type ref. The real template_id (141154) is present but
-        # may not be the first match. Verify it's a positive int.
-        assert isinstance(t["template_id"], int)
-        assert t["template_id"] > 0
+        assert result[1] == {
+            "template_id": 109109,
+            "template_name": "Feast Day",
+            "protein_g": 160.0,
+            "fat_g": 120.0,
+            "calories": None,
+            "carbs_g": 220.0,
+        }
+        assert result[0]["fat_g"] is None
+        assert result[0]["calories"] is None
 
-    def test_returns_empty_for_invalid(self):
-        assert CronometerClient._parse_macro_target_templates("//EX[err]") == []
+    def test_rejects_error_response(self):
+        with pytest.raises(ValueError, match="Could not parse"):
+            CronometerClient._parse_macro_target_templates("//EX[err]")
 
-    def test_returns_empty_for_missing_type(self):
+    def test_rejects_unexpected_shape(self):
         raw = '//OK[1,2,["java.util.ArrayList/4159755760"],0,7]'
-        assert CronometerClient._parse_macro_target_templates(raw) == []
+        with pytest.raises(ValueError, match="Could not parse"):
+            CronometerClient._parse_macro_target_templates(raw)
 
 
 # ── Fasting Parser Tests ─────────────────────────────────────────────

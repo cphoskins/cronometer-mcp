@@ -355,6 +355,101 @@ class SessionExpiredError(RuntimeError):
     """Cronometer rejected the session (expired or logged out server-side)."""
 
 
+class _GwtReader:
+    """Read a GWT-RPC //OK response object by object, the way GWT does.
+
+    Tokens are consumed from the end. An object is a type ref (1-based into
+    the string table) followed by its fields, a negative back-reference to an
+    object already read, or a bare 0 for null. Only the types the macro target
+    responses use are known; anything else raises rather than guessing.
+
+    Position-based parsing broke on real data: an unset macro is a null, so
+    "the first four floats" shifted or came up short (issue #5).
+    """
+
+    def __init__(self, raw: str):
+        self.raw = raw
+        if not raw.startswith("//OK[") or not raw.endswith(",0,7]"):
+            self.fail("not a GWT-RPC success response")
+        self.strings = CronometerClient._extract_gwt_string_table(raw)
+        self.tokens = CronometerClient._tokenize_gwt_data(raw, self.strings)
+        self.seen: list = []
+
+    def fail(self, why: str):
+        raise ValueError(f"Could not parse GWT response ({why}): {self.raw[:300]}")
+
+    def next(self):
+        if not self.tokens:
+            self.fail("ran out of tokens")
+        return self.tokens.pop()
+
+    def string(self) -> str | None:
+        ref = self.next()
+        return self.strings[ref - 1] if ref else None
+
+    def object(self):
+        ref = self.next()
+        if ref == 0:
+            return None
+        if ref < 0:
+            return self.seen[-ref - 1]
+        if not isinstance(ref, int) or ref > len(self.strings):
+            self.fail(f"bad type ref {ref!r}")
+        slot = len(self.seen)
+        self.seen.append(None)
+        self.seen[slot] = self._read(self.strings[ref - 1].split("/")[0])
+        return self.seen[slot]
+
+    def done(self) -> None:
+        if self.tokens:
+            self.fail(f"{len(self.tokens)} unread tokens")
+
+    def _read(self, type_name: str):
+        short = type_name.rsplit(".", 1)[-1]
+        if type_name in ("java.lang.Boolean", "java.lang.Integer") or short.endswith("Enum"):
+            return int(self.next())
+        if type_name == "java.lang.Double":
+            return float(self.next())
+        if type_name == "java.util.ArrayList":
+            return [self.object() for _ in range(self.next())]
+        if short == "Day":
+            day, month, year = self.next(), self.next(), self.next()
+            return date(year, month, day)
+        if short == "DayOfWeek":
+            return self.object()
+        if short == "MacroSchedule":
+            return {"day_of_week": self.object(), "template": self.object()}
+        if short == "MacroTargetTemplate":
+            return self._macro_target_template()
+        self.fail(f"unexpected type {type_name}")
+
+    def _macro_target_template(self) -> dict:
+        # Field order cross-checked against the saveMacroTargetTemplate payload
+        # and five live templates. Unnamed fields are always null/0 in practice.
+        self.object()                       # Boolean flag
+        carbs = self.object()
+        self.object()                       # Double, unused
+        self.object()                       # Day (daily targets only)
+        calories = self.object()
+        fat = self.object()
+        self.object()                       # Double, unused
+        self.next()                         # int flag
+        template_id = self.object()
+        self.string()                       # program, e.g. "Rigorous"
+        self.next()                         # int
+        name = self.string()
+        protein = self.object()
+        self.object()                       # Double, unused
+        return {
+            "template_id": template_id or 0,
+            "template_name": name or "",
+            "protein_g": protein,
+            "fat_g": fat,
+            "calories": calories,
+            "carbs_g": carbs,
+        }
+
+
 class CronometerClient:
     """Client for the Cronometer GWT-RPC API.
 
@@ -1467,50 +1562,27 @@ class CronometerClient:
         """Parse a GWT-RPC response containing a single MacroTargetTemplate.
 
         Works for both getDailyMacroTargetTemplate and getMacroTargetTemplate
-        responses. Extracts macro values by finding float tokens in the data.
-
-        The float values appear in a fixed order (left to right):
-        protein, fat, calories, carbs.
+        responses.
 
         Returns:
             Dict with keys: protein_g, fat_g, calories, carbs_g, template_name.
+            A macro with no target set in Cronometer is None, not 0.
+
+        Raises:
+            ValueError: If the response does not decode as a template.
         """
-        result = {
-            "protein_g": 0.0,
-            "fat_g": 0.0,
-            "calories": 0.0,
-            "carbs_g": 0.0,
-            "template_name": "",
+        reader = _GwtReader(raw)
+        template = reader.object()
+        reader.done()
+        if not isinstance(template, dict):
+            reader.fail("expected a MacroTargetTemplate")
+        return {
+            "protein_g": template["protein_g"],
+            "fat_g": template["fat_g"],
+            "calories": template["calories"],
+            "carbs_g": template["carbs_g"],
+            "template_name": template["template_name"],
         }
-
-        if not raw.startswith("//OK[") or not raw.endswith(",0,7]"):
-            return result
-
-        string_table = CronometerClient._extract_gwt_string_table(raw)
-
-        # Template name = last non-class string in the string table
-        for entry in reversed(string_table):
-            if (
-                not entry.startswith("com.")
-                and not entry.startswith("java.")
-                and not entry.startswith("[")
-            ):
-                result["template_name"] = entry
-                break
-
-        # Tokenize and extract float values
-        tokens = CronometerClient._tokenize_gwt_data(raw, string_table)
-        floats = [t for t in tokens if isinstance(t, float)]
-
-        # In MacroTargetTemplate responses, floats appear in order:
-        # protein, fat, calories, carbs
-        if len(floats) >= 4:
-            result["protein_g"] = floats[0]
-            result["fat_g"] = floats[1]
-            result["calories"] = floats[2]
-            result["carbs_g"] = floats[3]
-
-        return result
 
     @staticmethod
     def _parse_all_macro_schedules(raw: str) -> list[dict]:
@@ -1520,138 +1592,37 @@ class CronometerClient:
         day_of_week (0=Sun..6=Sat), protein_g, fat_g, calories, carbs_g,
         template_name, template_id.
 
-        GWT encoding note: The response contains 7 MacroSchedule objects
-        in fixed-size blocks. Only the first block uses full type refs;
-        subsequent blocks use GWT back-references (-N). The block size
-        is determined by finding the first MacroSchedule type ref.
-        Within each block, floats appear in order: protein, fat, calories,
-        carbs. The day ordinal is the last token in each block (for block 0,
-        the MacroSchedule type ref occupies that slot, so day 0 = Sunday
-        is inferred).
+        A macro with no target set in Cronometer is None, not 0.
+
+        Raises:
+            ValueError: If the response does not decode as a schedule list.
         """
         _DOW_NAMES = [
             "Sunday", "Monday", "Tuesday", "Wednesday",
             "Thursday", "Friday", "Saturday",
         ]
 
-        if not raw.startswith("//OK[") or not raw.endswith(",0,7]"):
-            return []
-
-        string_table = CronometerClient._extract_gwt_string_table(raw)
-        tokens = CronometerClient._tokenize_gwt_data(raw, string_table)
-
-        # Find MacroSchedule type index (1-based) in string table
-        schedule_type_idx = None
-        for idx, entry in enumerate(string_table):
-            if "MacroSchedule/" in entry:
-                schedule_type_idx = idx + 1
-                break
-
-        if schedule_type_idx is None:
-            return []
-
-        # Find the first occurrence of the MacroSchedule type ref to
-        # determine block size. It appears at the END of the first block.
-        first_sched_pos = None
-        for i, token in enumerate(tokens):
-            if token == schedule_type_idx:
-                first_sched_pos = i
-                break
-
-        if first_sched_pos is None:
-            return []
-
-        block_size = first_sched_pos + 1  # block 0 spans tokens 0..first_sched_pos
-
-        # Template name(s) — non-class strings in the string table.
-        # Also handle negative back-refs (e.g., -6 → string_table[5]).
-        template_names = {}
-        for idx, entry in enumerate(string_table):
-            if (
-                not entry.startswith("com.")
-                and not entry.startswith("java.")
-                and not entry.startswith("[")
-            ):
-                template_names[idx + 1] = entry      # positive ref
-                template_names[-(idx + 1)] = entry    # negative back-ref
-
-        # Extract 7 blocks and determine day ordinals.
-        # GWT serialization varies between Cronometer versions:
-        # - Some versions put the ordinal at block[-4] (before type refs)
-        # - Others put it at block[-1] (after back-refs)
-        # Strategy: try block[-4] first; if values aren't unique 0-6, try block[-1].
-        blocks = []
-        for block_idx in range(7):
-            start = block_idx * block_size
-            end = start + block_size
-            if end > len(tokens):
-                break
-            blocks.append(tokens[start:end])
-
-        # Try block[-4] for day ordinals
-        ordinals_m4 = [b[-4] if len(b) >= 4 and isinstance(b[-4], int) else -1 for b in blocks]
-        ordinals_m1 = [b[-1] if len(b) >= 1 and isinstance(b[-1], int) else -1 for b in blocks]
-
-        if set(ordinals_m4) == set(range(7)):
-            ordinals = ordinals_m4
-        else:
-            # block[-1] has ordinals for blocks 1-6; block 0's [-1] is
-            # the MacroSchedule type ref (a duplicate value). Detect the
-            # duplicate and replace it with the missing ordinal.
-            ordinals = list(ordinals_m1)
-            seen: dict[int, list[int]] = {}
-            for i, v in enumerate(ordinals):
-                seen.setdefault(v, []).append(i)
-            missing = set(range(7)) - set(ordinals)
-            if missing:
-                missing_val = missing.pop()
-                # Find the duplicate value — the one that appears twice
-                for val, indices in seen.items():
-                    if len(indices) > 1:
-                        # The first occurrence (block 0) is the bogus one
-                        ordinals[indices[0]] = missing_val
-                        break
-            # Fallback: if still not unique, assign sequentially
-            if set(ordinals) != set(range(7)):
-                ordinals = list(range(7))
+        reader = _GwtReader(raw)
+        entries = reader.object()
+        reader.done()
+        if not isinstance(entries, list):
+            reader.fail("expected a list of MacroSchedule")
 
         schedules = []
-        for block_idx, block in enumerate(blocks):
-            dow_ordinal = ordinals[block_idx]
+        for entry in entries:
+            dow = entry["day_of_week"]
+            template = entry["template"] or {}
+            schedules.append({
+                "day_of_week": dow,
+                "day_name": _DOW_NAMES[dow] if 0 <= dow < 7 else f"Day {dow}",
+                "protein_g": template.get("protein_g"),
+                "fat_g": template.get("fat_g"),
+                "calories": template.get("calories"),
+                "carbs_g": template.get("carbs_g"),
+                "template_name": template.get("template_name", ""),
+                "template_id": template.get("template_id", 0),
+            })
 
-            template_data = {
-                "day_of_week": dow_ordinal,
-                "day_name": _DOW_NAMES[dow_ordinal] if 0 <= dow_ordinal < 7 else f"Day {dow_ordinal}",
-                "protein_g": 0.0,
-                "fat_g": 0.0,
-                "calories": 0.0,
-                "carbs_g": 0.0,
-                "template_name": "",
-                "template_id": 0,
-            }
-
-            # Extract floats from this block → [protein, fat, calories, carbs]
-            floats = [t for t in block if isinstance(t, float)]
-            if len(floats) >= 4:
-                template_data["protein_g"] = floats[0]
-                template_data["fat_g"] = floats[1]
-                template_data["calories"] = floats[2]
-                template_data["carbs_g"] = floats[3]
-
-            # Template name: look for string refs (positive or negative)
-            for t in block:
-                if isinstance(t, int) and t in template_names:
-                    template_data["template_name"] = template_names[t]
-
-            # Template ID: large integer (> string table size) in the block
-            for t in block:
-                if isinstance(t, int) and t > len(string_table):
-                    template_data["template_id"] = t
-                    break
-
-            schedules.append(template_data)
-
-        # Sort by day_of_week
         schedules.sort(key=lambda x: x["day_of_week"])
         return schedules
 
@@ -1781,86 +1752,16 @@ class CronometerClient:
         """Parse getMacroTargetTemplates GWT response.
 
         Returns list of template dicts with id, name, and macro values.
+        A macro with no target set in Cronometer is None, not 0.
+
+        Raises:
+            ValueError: If the response does not decode as a template list.
         """
-        if not raw.startswith("//OK["):
-            return []
-
-        string_table = CronometerClient._extract_gwt_string_table(raw)
-        tokens = CronometerClient._tokenize_gwt_data(raw, string_table)
-
-        # Find MacroTargetTemplate type index
-        template_type_idx = None
-        for idx, entry in enumerate(string_table):
-            if "MacroTargetTemplate/" in entry:
-                template_type_idx = idx + 1
-                break
-
-        if template_type_idx is None:
-            return []
-
-        # Find block boundaries by locating each template type ref
-        # or back-reference. First occurrence is the type ref,
-        # subsequent are back-refs (negative).
-        first_pos = None
-        for i, token in enumerate(tokens):
-            if token == template_type_idx:
-                first_pos = i
-                break
-
-        if first_pos is None:
-            return []
-
-        block_size = first_pos + 1
-
-        # Extract template names from string table
-        template_name_map = {}
-        for idx, entry in enumerate(string_table):
-            if (
-                not entry.startswith("com.")
-                and not entry.startswith("java.")
-                and not entry.startswith("[")
-            ):
-                template_name_map[idx + 1] = entry
-                template_name_map[-(idx + 1)] = entry
-
-        templates = []
-        block_idx = 0
-        while True:
-            start = block_idx * block_size
-            end = start + block_size
-            if end > len(tokens):
-                break
-
-            block = tokens[start:end]
-
-            # Extract floats: [protein, fat, calories, carbs]
-            floats = [t for t in block if isinstance(t, float)]
-
-            # Extract template name
-            name = ""
-            for t in block:
-                if isinstance(t, int) and t in template_name_map:
-                    name = template_name_map[t]
-
-            # Extract template ID: large int > string table size
-            template_id = 0
-            for t in block:
-                if isinstance(t, int) and t > len(string_table):
-                    template_id = t
-                    break
-
-            if len(floats) >= 4:
-                templates.append({
-                    "template_id": template_id,
-                    "template_name": name,
-                    "protein_g": floats[0],
-                    "fat_g": floats[1],
-                    "calories": floats[2],
-                    "carbs_g": floats[3],
-                })
-
-            block_idx += 1
-
+        reader = _GwtReader(raw)
+        templates = reader.object()
+        reader.done()
+        if not isinstance(templates, list):
+            reader.fail("expected a list of MacroTargetTemplate")
         return templates
 
     def save_macro_schedule(
