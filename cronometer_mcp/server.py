@@ -1,8 +1,10 @@
 """MCP server for Cronometer nutrition data."""
 
+import functools
 import json
 import logging
 import os
+import threading
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -36,9 +38,24 @@ if READ_ONLY:
     logger.info("Read-only mode: tools that change Cronometer data are disabled")
 
 
+# MCP SDK 2 runs sync tools in worker threads, so parallel tool calls would
+# share one client's session, nonce and login state at once. SDK 1 ran them
+# inline, one at a time; keep that.
+_client_lock = threading.Lock()
+
+
+def _tool(fn):
+    """Register a tool that runs while holding the client lock."""
+    @functools.wraps(fn)
+    def serialized(*args, **kwargs):
+        with _client_lock:
+            return fn(*args, **kwargs)
+    return mcp.tool()(serialized)
+
+
 def _write_tool(fn):
     """Register a tool that changes Cronometer data, unless read-only."""
-    return fn if READ_ONLY else mcp.tool()(fn)
+    return fn if READ_ONLY else _tool(fn)
 
 
 _client: CronometerClient | None = None
@@ -128,7 +145,7 @@ def _format_servings(rows: list[dict]) -> list[dict]:
     return formatted
 
 
-@mcp.tool()
+@_tool
 def get_food_log(
     start_date: str | None = None,
     end_date: str | None = None,
@@ -185,7 +202,7 @@ def get_food_log(
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_tool
 def get_daily_nutrition(
     start_date: str | None = None,
     end_date: str | None = None,
@@ -225,7 +242,7 @@ def get_daily_nutrition(
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_tool
 def get_micronutrients(
     start_date: str | None = None,
     end_date: str | None = None,
@@ -283,7 +300,7 @@ def get_micronutrients(
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_tool
 def export_raw_csv(
     export_type: str,
     start_date: str | None = None,
@@ -413,7 +430,7 @@ def _resolve_diary_group(client, diary_group) -> tuple[int | None, str | None]:
     return match["wire_index"], None
 
 
-@mcp.tool()
+@_tool
 def list_diary_groups() -> str:
     """List this account's diary groups, with the values add_food_entry accepts.
 
@@ -447,7 +464,7 @@ def list_diary_groups() -> str:
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_tool
 def search_foods(query: str) -> str:
     """Search Cronometer's food database by name.
 
@@ -473,7 +490,7 @@ def search_foods(query: str) -> str:
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_tool
 def get_food_details(food_source_id: int) -> str:
     """Get detailed food information including available serving measures.
 
@@ -583,7 +600,7 @@ def remove_food_entry(serving_id: str) -> str:
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_tool
 def get_macro_targets(
     target_date: str | None = None,
 ) -> str:
@@ -775,7 +792,7 @@ def set_weekly_macro_schedule(
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_tool
 def list_macro_templates() -> str:
     """List all saved macro target templates in Cronometer.
 
@@ -867,7 +884,7 @@ def create_macro_template(
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_tool
 def get_fasting_history(
     start_date: str | None = None,
     end_date: str | None = None,
@@ -905,7 +922,7 @@ def get_fasting_history(
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_tool
 def get_fasting_stats() -> str:
     """Get aggregate fasting statistics from Cronometer.
 
@@ -965,7 +982,7 @@ def cancel_active_fast(fast_id: int) -> str:
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_tool
 def get_recent_biometrics() -> str:
     """Get the most recently logged biometric entries from Cronometer.
 
@@ -1055,7 +1072,7 @@ def _get_data_dir() -> Path:
     return Path.home() / ".local" / "share" / "cronometer-mcp"
 
 
-@mcp.tool()
+@_tool
 def sync_cronometer(
     start_date: str | None = None,
     end_date: str | None = None,
@@ -1180,7 +1197,7 @@ def set_day_complete(date: str, complete: bool = True) -> str:
         return json.dumps({"status": "error", "message": f"{type(e).__name__}: {e}"})
 
 
-@mcp.tool()
+@_tool
 def get_repeated_items() -> str:
     """List all recurring food entries.
 

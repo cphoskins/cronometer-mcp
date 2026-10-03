@@ -3,6 +3,8 @@
 import asyncio
 import importlib
 import json
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -50,6 +52,42 @@ class TestReadOnlyMode:
     @pytest.mark.parametrize("value", ["0", "false", "no"])
     def test_falsy_values_keep_write_tools(self, value):
         assert WRITE_TOOLS <= _tool_names({"CRONOMETER_READ_ONLY": value})
+
+
+class TestToolCallsAreSerialized:
+    def test_parallel_calls_never_share_the_client(self):
+        """MCP 2 runs sync tools in worker threads; the client is not thread-safe.
+
+        MCP 1 ran them inline, one at a time. Parallel tool calls must not
+        interleave on the shared session and nonce.
+        """
+        active = 0
+        peak = 0
+        guard = threading.Lock()
+
+        def slow_search(query, max_results=50):
+            nonlocal active, peak
+            with guard:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.05)
+            with guard:
+                active -= 1
+            return []
+
+        client = MagicMock()
+        client.find_foods.side_effect = slow_search
+
+        async def run_parallel():
+            await asyncio.gather(*(
+                server.mcp.call_tool("search_foods", {"query": f"food {i}"})
+                for i in range(4)
+            ))
+
+        with patch.object(server, "_get_client", return_value=client):
+            asyncio.run(run_parallel())
+        assert client.find_foods.call_count == 4
+        assert peak == 1
 
 
 class TestSetMacroTargets:
