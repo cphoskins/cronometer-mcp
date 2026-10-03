@@ -6,7 +6,7 @@ import os
 from datetime import date, timedelta
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .client import CronometerClient
 from .markdown import generate_food_log_md
@@ -14,7 +14,7 @@ from .markdown import generate_food_log_md
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP(
+mcp = MCPServer(
     "cronometer",
     instructions=(
         "Cronometer MCP server for nutrition tracking. "
