@@ -1,14 +1,22 @@
-name: Publish to PyPI
+name: Publish to PyPI and MCP Registry
 
 on:
   release:
     types: [published]
+  # Manual runs skip PyPI and publish an already-released tag's server.json to
+  # the MCP Registry, e.g. to catch up or retry after a registry outage.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish to the MCP Registry, e.g. v2.3.0"
+        required: true
 
 permissions:
   id-token: write
 
 jobs:
   publish:
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment: pypi
     steps:
@@ -26,3 +34,46 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  mcp-registry:
+    needs: publish
+    # After a release's PyPI upload, or on its own from a manual run.
+    if: ${{ !cancelled() && (needs.publish.result == 'success' || needs.publish.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      MCP_PUBLISHER_VERSION: "1.8.1"
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Check server.json matches the tag
+        run: |
+          jq -e --arg v "${TAG#v}" '.version == $v and (.packages | length) > 0 and all(.packages[]; .version == $v)' server.json \
+            || { echo "server.json version does not match $TAG"; exit 1; }
+
+      - name: Install mcp-publisher
+        run: |
+          base="https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}"
+          curl -sSfLO "$base/mcp-publisher_linux_amd64.tar.gz"
+          curl -sSfLO "$base/registry_${MCP_PUBLISHER_VERSION}_checksums.txt"
+          grep ' mcp-publisher_linux_amd64.tar.gz$' "registry_${MCP_PUBLISHER_VERSION}_checksums.txt" | sha256sum -c -
+          tar xzf mcp-publisher_linux_amd64.tar.gz mcp-publisher
+
+      - name: Authenticate to MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server.json
+        # The registry checks the version exists on PyPI, which can lag the
+        # upload by a minute or so.
+        run: |
+          for attempt in 1 2 3 4 5; do
+            ./mcp-publisher publish && exit 0
+            echo "Publish attempt $attempt failed; retrying in 30s"
+            sleep 30
+          done
+          exit 1

@@ -5,7 +5,7 @@ if [ $# -ne 1 ]; then
     echo "Usage: ./release.sh <version>"
     echo ""
     echo "Bumps version, commits, tags, and pushes a release."
-    echo "The GitHub Actions workflow then publishes to PyPI."
+    echo "A GitHub Release from the tag then publishes to PyPI and the MCP Registry."
     echo ""
     echo "Examples:"
     echo "  ./release.sh 0.2.0"
@@ -65,5 +65,5 @@ git push origin main --tags
 
 echo ""
 echo "Pushed ${TAG} to origin."
-echo "Now create a GitHub Release from the tag to trigger PyPI publish:"
+echo "Now create a GitHub Release from the tag to publish to PyPI, then the MCP Registry:"
 echo "  https://github.com/cphoskins/cronometer-mcp/releases/new?tag=${TAG}"

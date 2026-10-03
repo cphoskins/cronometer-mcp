@@ -10,4 +10,6 @@ Instructions for coding agents working in this repo.
   tags `v<version>` and pushes `main` with tags.
 - Before running it: the working tree is clean and `python -m pytest` passes.
 - The tag alone does not publish. Create a GitHub release from the tag; that triggers
-  `.github/workflows/publish.yml`, which builds the package and publishes it to PyPI.
+  `.github/workflows/publish.yml`, which publishes to PyPI and then publishes `server.json` to the
+  MCP Registry (GitHub OIDC, no secrets). Never publish to the registry by hand; if that job
+  fails, re-run it with a manual `workflow_dispatch` of the same workflow, which skips PyPI.
