@@ -351,6 +351,11 @@ EXPORT_TYPES = {
 }
 
 
+# (connect, read) seconds. Tool calls run one at a time (see server.py), so a
+# request that never returns would otherwise block every other tool.
+REQUEST_TIMEOUT = (10, 60)
+
+
 class SessionExpiredError(RuntimeError):
     """Cronometer rejected the session (expired or logged out server-side)."""
 
@@ -487,7 +492,7 @@ class CronometerClient:
 
     def _get_anticsrf(self) -> str:
         """Step 1: Fetch the login page and extract the anti-CSRF token."""
-        resp = self.session.get(LOGIN_HTML_URL)
+        resp = self.session.get(LOGIN_HTML_URL, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
         match = re.search(r'name="anticsrf"\s+value="([^"]+)"', resp.text)
         if not match:
@@ -504,6 +509,7 @@ class CronometerClient:
                 "password": self.password,
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
         result = resp.json()
@@ -529,7 +535,7 @@ class CronometerClient:
         """
         try:
             # Step 1: Get permutation hash from nocache.js
-            resp = self.session.get(GWT_NOCACHE_JS_URL)
+            resp = self.session.get(GWT_NOCACHE_JS_URL, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
             perm_match = re.search(r"='([A-F0-9]{32})'", resp.text)
             if not perm_match:
@@ -539,7 +545,7 @@ class CronometerClient:
 
             # Step 2: Get GWT header from the compiled cache.js
             cache_url = GWT_CACHE_JS_URL.replace("{permutation}", permutation)
-            resp = self.session.get(cache_url)
+            resp = self.session.get(cache_url, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
             # The 'app' endpoint hash appears as: 'app','<32-HEX>'
             header_match = re.search(
@@ -576,6 +582,7 @@ class CronometerClient:
                 "x-gwt-module-base": DEFAULT_GWT_MODULE_BASE,
                 "x-gwt-permutation": self.gwt_permutation,
             },
+            timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
 
@@ -611,6 +618,7 @@ class CronometerClient:
                 "x-gwt-module-base": DEFAULT_GWT_MODULE_BASE,
                 "x-gwt-permutation": self.gwt_permutation,
             },
+            timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
 
@@ -776,6 +784,7 @@ class CronometerClient:
                 "sec-fetch-mode": "navigate",
                 "sec-fetch-site": "same-origin",
             },
+            timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
         return resp.text
@@ -821,6 +830,7 @@ class CronometerClient:
                     "x-gwt-module-base": DEFAULT_GWT_MODULE_BASE,
                     "x-gwt-permutation": self.gwt_permutation,
                 },
+                timeout=REQUEST_TIMEOUT,
             )
             resp.raise_for_status()
             if resp.text.startswith("//OK"):
@@ -1054,6 +1064,7 @@ class CronometerClient:
                     "selectedTab": "ALL",
                     "type": "All",
                 },
+                timeout=REQUEST_TIMEOUT,
             )
             if resp.status_code in (401, 403) and not attempt:
                 self._reauthenticate()
