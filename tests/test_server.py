@@ -122,3 +122,72 @@ class TestSetMacroTargets:
         assert kwargs["protein_g"] == 160
         assert kwargs["calories"] == 1900
         assert kwargs["fat_g"] == 70.0
+
+
+class TestTransportSelection:
+    """main() picks the transport from CRONOMETER_TRANSPORT and friends."""
+
+    def _run_main(self, env: dict) -> MagicMock:
+        run = MagicMock()
+        with patch.dict("os.environ", env, clear=False), patch.object(server.mcp, "run", run):
+            server.main()
+        return run
+
+    def test_default_is_stdio(self):
+        run = self._run_main({"CRONOMETER_TRANSPORT": "", "CRONOMETER_HOST": "",
+                              "CRONOMETER_PORT": ""})
+        run.assert_called_once_with(transport="stdio")
+
+    def test_streamable_http_defaults_to_localhost_8000(self):
+        run = self._run_main({"CRONOMETER_TRANSPORT": "streamable-http",
+                              "CRONOMETER_HOST": "", "CRONOMETER_PORT": ""})
+        run.assert_called_once_with(transport="streamable-http", host="127.0.0.1", port=8000)
+
+    def test_host_and_port_pass_through(self):
+        run = self._run_main({"CRONOMETER_TRANSPORT": " Streamable-HTTP ",
+                              "CRONOMETER_HOST": "0.0.0.0", "CRONOMETER_PORT": "9000"})
+        run.assert_called_once_with(transport="streamable-http", host="0.0.0.0", port=9000)
+
+    @pytest.mark.parametrize("port", ["1", "65535"])
+    def test_port_range_edges_are_accepted(self, port):
+        run = self._run_main({"CRONOMETER_TRANSPORT": "streamable-http",
+                              "CRONOMETER_HOST": "", "CRONOMETER_PORT": port})
+        run.assert_called_once_with(transport="streamable-http", host="127.0.0.1", port=int(port))
+
+    @pytest.mark.parametrize("env", [
+        {"CRONOMETER_TRANSPORT": "carrier-pigeon"},
+        {"CRONOMETER_TRANSPORT": "sse"},
+        {"CRONOMETER_TRANSPORT": "streamable-http", "CRONOMETER_PORT": "abc"},
+        {"CRONOMETER_TRANSPORT": "streamable-http", "CRONOMETER_PORT": "-1"},
+        {"CRONOMETER_TRANSPORT": "streamable-http", "CRONOMETER_PORT": "0"},
+        {"CRONOMETER_TRANSPORT": "streamable-http", "CRONOMETER_PORT": "65536"},
+    ])
+    def test_bad_config_exits_without_running(self, env):
+        run = MagicMock()
+        with patch.dict("os.environ", env), patch.object(server.mcp, "run", run):
+            with pytest.raises(SystemExit) as exc:
+                server.main()
+        assert exc.value.code != 0
+        run.assert_not_called()
+
+    def test_allowed_hosts_enable_header_validation(self):
+        run = self._run_main({"CRONOMETER_TRANSPORT": "streamable-http",
+                              "CRONOMETER_HOST": "0.0.0.0", "CRONOMETER_PORT": "",
+                              "CRONOMETER_ALLOWED_HOSTS": "nas.local:8000, 10.0.0.5:*"})
+        sec = run.call_args.kwargs["transport_security"]
+        assert sec.enable_dns_rebinding_protection is True
+        assert sec.allowed_hosts == ["nas.local:8000", "10.0.0.5:*"]
+        assert "http://nas.local:8000" in sec.allowed_origins
+        assert "https://10.0.0.5:*" in sec.allowed_origins
+
+    def test_no_allowed_hosts_leaves_sdk_defaults(self):
+        run = self._run_main({"CRONOMETER_TRANSPORT": "streamable-http",
+                              "CRONOMETER_HOST": "0.0.0.0", "CRONOMETER_PORT": "",
+                              "CRONOMETER_ALLOWED_HOSTS": ""})
+        assert "transport_security" not in run.call_args.kwargs
+
+    def test_ipv6_host_is_bracketed_in_log(self, caplog):
+        with caplog.at_level("INFO", logger="cronometer_mcp.server"):
+            self._run_main({"CRONOMETER_TRANSPORT": "streamable-http",
+                            "CRONOMETER_HOST": "::1", "CRONOMETER_PORT": "8000"})
+        assert "http://[::1]:8000/mcp" in caplog.text

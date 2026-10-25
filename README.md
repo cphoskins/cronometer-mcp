@@ -98,6 +98,57 @@ it only writes files on your machine.
 This limits what the server offers, not what your credentials can do. Cronometer has no read-only
 login, so the password in `env` still has full access to the account.
 
+### Remote access (streamable HTTP)
+
+By default the server talks to its client over stdio. To run it on another machine or in a
+container, set `CRONOMETER_TRANSPORT=streamable-http` and it serves the MCP endpoint at
+`http://<host>:<port>/mcp` instead.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CRONOMETER_TRANSPORT` | `stdio` | `stdio` or `streamable-http` |
+| `CRONOMETER_HOST` | `127.0.0.1` | Interface to bind. Use `0.0.0.0` inside a container. |
+| `CRONOMETER_PORT` | `8000` | TCP port, 1 to 65535 |
+| `CRONOMETER_ALLOWED_HOSTS` | unset | Comma-separated `Host` header values clients may use, as `host:port` or `host:*`. Set it whenever the bind host is not loopback. |
+
+In Docker, against the published package, reachable as `your-server` on your network:
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e CRONOMETER_USERNAME=your@email.com \
+  -e CRONOMETER_PASSWORD=your-password \
+  -e CRONOMETER_TRANSPORT=streamable-http \
+  -e CRONOMETER_HOST=0.0.0.0 \
+  -e CRONOMETER_ALLOWED_HOSTS=your-server:8000 \
+  python:3.12-slim sh -c "pip install -q cronometer-mcp && cronometer-mcp"
+```
+
+`CRONOMETER_ALLOWED_HOSTS` matters: the MCP SDK checks `Host` and `Origin` headers on its own only
+when bound to loopback. On any other bind it accepts every `Host`, which lets a web page you happen
+to open on the same network reach the server through DNS rebinding. With the allowlist set,
+requests whose `Host` or `Origin` is not on it get `421` or `403`. Without it the server logs a
+warning at startup and runs anyway.
+
+Then point the client at the URL. Claude Code (`.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "cronometer": {
+      "type": "http",
+      "url": "http://your-server:8000/mcp"
+    }
+  }
+}
+```
+
+The endpoint has no authentication. Anyone who can reach the port can read and change the
+Cronometer account whose credentials the server holds. Keep it bound to `127.0.0.1`, or put it on
+a network only you can reach (a VPN or Tailscale keeps strangers out; it does not stop the DNS
+rebinding case above, so set the allowlist as well) or behind a reverse proxy that authenticates.
+Adding `CRONOMETER_READ_ONLY=1` narrows what a remote client can do, with the same caveat as above:
+the credentials themselves keep full access.
+
 ## Available Tools
 
 ### Food Log & Nutrition

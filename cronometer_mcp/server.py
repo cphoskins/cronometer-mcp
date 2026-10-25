@@ -1306,7 +1306,47 @@ def delete_repeat_item(repeat_item_id: int) -> str:
 
 
 def main():
-    mcp.run(transport="stdio")
+    # CRONOMETER_TRANSPORT=streamable-http serves http://HOST:PORT/mcp instead
+    # of stdio. There is no authentication: whoever can reach the port acts
+    # as the account in the environment, so the default host stays local.
+    transport = os.environ.get("CRONOMETER_TRANSPORT", "").strip().lower() or "stdio"
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+        return
+    if transport != "streamable-http":
+        logger.error("CRONOMETER_TRANSPORT must be 'stdio' or 'streamable-http', got %r", transport)
+        raise SystemExit(2)
+    host = os.environ.get("CRONOMETER_HOST", "").strip() or "127.0.0.1"
+    port_raw = os.environ.get("CRONOMETER_PORT", "").strip() or "8000"
+    try:
+        port = int(port_raw)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        logger.error("CRONOMETER_PORT must be an integer from 1 to 65535, got %r", port_raw)
+        raise SystemExit(2)
+    # The SDK validates Host and Origin headers (DNS rebinding protection) on
+    # its own only for loopback binds. Anywhere else it accepts any Host, so
+    # CRONOMETER_ALLOWED_HOSTS names the values clients may send, as
+    # "host:port" or "host:*", comma separated.
+    kwargs = {}
+    allowed = [h.strip() for h in os.environ.get("CRONOMETER_ALLOWED_HOSTS", "").split(",")
+               if h.strip()]
+    if allowed:
+        from mcp.server.transport_security import TransportSecuritySettings
+        kwargs["transport_security"] = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=allowed,
+            allowed_origins=[f"{scheme}://{h}" for h in allowed for scheme in ("http", "https")],
+        )
+    elif host not in ("127.0.0.1", "localhost", "::1"):
+        logger.warning(
+            "Binding %s with no CRONOMETER_ALLOWED_HOSTS: any Host header is accepted, "
+            "so a web page on the same network can reach this server (DNS rebinding)", host,
+        )
+    url_host = f"[{host}]" if ":" in host else host
+    logger.info("Serving streamable HTTP at http://%s:%d/mcp", url_host, port)
+    mcp.run(transport="streamable-http", host=host, port=port, **kwargs)
 
 
 if __name__ == "__main__":
