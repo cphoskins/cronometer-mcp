@@ -22,3 +22,16 @@ Instructions for coding agents working in this repo.
   `.github/workflows/publish.yml`, which publishes to PyPI and then publishes `server.json` to the
   MCP Registry (GitHub OIDC, no secrets). Never publish to the registry by hand; if that job
   fails, re-run it with a manual `workflow_dispatch` of the same workflow, which skips PyPI.
+
+## Drift and live tests
+
+- `python -m pytest` stays offline: tests marked `drift` or `live` are deselected by default.
+- `pytest -m drift` fetches Cronometer's live GWT serialization policy (no login) and fails if
+  any RPC template sends a type signature the policy no longer lists. `.github/workflows/drift.yml`
+  runs it daily and opens or comments on an issue labelled `drift`.
+- `pytest -m live` logs in with `CRONOMETER_USERNAME` / `CRONOMETER_PASSWORD` and writes to the
+  real account. Don't run it casually. Writes go only to 2000-01-01 and are refused if that day
+  already has entries.
+- Cronometer rations CSV exports per account; going over returns HTTP 429 for hours and breaks the
+  MCP's own reads too. The live tests make exactly two exports per run. Don't add more, and don't
+  loop export calls while debugging.
