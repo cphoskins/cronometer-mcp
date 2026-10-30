@@ -2300,7 +2300,7 @@ class CronometerClient:
         biometric_id = ""
         if raw.startswith("//OK["):
             import re
-            match = re.search(r'"([A-Za-z0-9]+)"', raw)
+            match = re.search(r'"([A-Za-z0-9$_]+)"', raw)
             if match:
                 biometric_id = match.group(1)
 

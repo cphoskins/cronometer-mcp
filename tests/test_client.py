@@ -2042,3 +2042,16 @@ class TestDeleteRepeatItem:
         )
         with pytest.raises(RuntimeError, match="GWT-RPC call failed"):
             c.delete_repeat_item(999999)
+
+
+class TestAddBiometric:
+    def test_id_with_gwt_long_chars(self):
+        """GWT long ids use A-Z a-z 0-9 $ _; all must survive parsing."""
+        c = CronometerClient(username="test@x.com", password="pw")
+        c._authenticated = True
+        c.nonce = "n"
+        c.user_id = "42"
+        c.session.post = MagicMock(return_value=MagicMock(
+            text='//OK["B$x_9P",[],0,7]', raise_for_status=lambda: None,
+        ))
+        assert c.add_biometric("weight", 150, date(2000, 1, 1)) == "B$x_9P"
