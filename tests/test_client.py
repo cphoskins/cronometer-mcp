@@ -897,8 +897,9 @@ class TestAddServing:
         return c
 
     def _mock_update_response(self, serving_id="D9TEST", food_id=502518, fsid=55985):
+        # Live layout since issue #13: one leading field fewer than before.
         return (
-            f'//OK[0,0,{food_id},"{serving_id}",{fsid},170.0,2107848,0,'
+            f'//OK[0,{food_id},"{serving_id}",{fsid},170.0,2107848,0,'
             f'124399,0,1,1,2026,3,5,4,3,2,1,1,'
             f'["java.util.ArrayList/4159755760"],0,7]'
         )
@@ -992,6 +993,32 @@ class TestAddServing:
         call_body = c.session.post.call_args[1].get("data") or c.session.post.call_args[0][1]
         # Should contain "170|" not "170.0|"
         assert "170|" in call_body
+
+    def test_serving_matches_live_serialization_policy(self):
+        """Serving uses the current type signature and field layout (issue #13).
+
+        Cronometer's Oct 2026 deploy changed Serving to signature 2895043750
+        and dropped its last serialized field: after the Day it writes
+        bool, bool, obj, int, obj, int, double, int, long, int, int.
+        """
+        c = self._make_client()
+        c.session.post = MagicMock(
+            return_value=MagicMock(
+                text=self._mock_update_response(), raise_for_status=lambda: None
+            )
+        )
+
+        c.add_serving(
+            food_id=1072101, food_source_id=464674,
+            measure_id=5, quantity=1, weight_grams=50,
+            day=date(2026, 3, 4), diary_group=1,
+        )
+
+        call_body = c.session.post.call_args[1].get("data") or c.session.post.call_args[0][1]
+        assert "com.cronometer.shared.entries.models.Serving/2895043750|" in call_body
+        assert call_body.endswith(
+            "|11|12|4|3|2026|1|1|0|65541|0|0|50|464674|A|1072101|0|"
+        )
 
 
 class TestRemoveServing:

@@ -94,11 +94,11 @@ GWT_UPDATE_DIARY = (
     "I|java.util.List|{nonce}|"
     "java.util.Collections$SingletonList/1586180994|"
     "com.cronometer.shared.entries.changes.AddEntryChange/3949104564|"
-    "com.cronometer.shared.entries.models.Serving/2553599101|"
+    "com.cronometer.shared.entries.models.Serving/2895043750|"
     "com.cronometer.shared.entries.models.Day/782579793|"
     "1|2|3|4|3|5|6|7|8|{user_id}|9|10|1|1|11|12|"
     "{day}|{month}|{year}|{quantity}|{diary_group}|0|{measure_id}|0|0|"
-    "{weight_grams}|{food_source_id}|A|{food_id}|0|1|"
+    "{weight_grams}|{food_source_id}|A|{food_id}|0|"
 )
 
 GWT_REMOVE_SERVING = (
@@ -1425,13 +1425,13 @@ class CronometerClient:
 
         raw = self._gwt_post(body)
 
-        # Response format (example):
-        # //OK[0,0,1072101,"D80lp$",464674,50.0,2107848,0,65541,0,1,1,2026,3,4,
+        # Response format (example, live since 2026-10-30, issue #13):
+        # //OK[0,1072101,"FAoVo9",464674,50.0,2107848,0,321007,0,1,1,2026,10,30,
         #      4,3,2,1,1,["java.util.ArrayList/...","com.cronometer..."],0,7]
         # Positional layout (0-indexed from the inner array start):
-        #   index 3 → serving_id (quoted string)
-        #   index 2 → food_id
-        #   index 4 → food_source_id
+        #   index 2 → serving_id (quoted string)
+        #   index 1 → food_id
+        #   index 3 → food_source_id
         inner_match = re.search(r"//OK\[(.+),\d+,7\]$", raw, re.DOTALL)
         if not inner_match:
             raise RuntimeError(
@@ -1440,10 +1440,10 @@ class CronometerClient:
 
         inner = inner_match.group(1)
         # The response layout is:
-        #   0,0,{food_id},"{serving_id}",{food_source_id},{weight},... ,[string_table],0,7
-        # Match the first five meaningful fields directly from the full inner string.
+        #   0,{food_id},"{serving_id}",{food_source_id},{weight},... ,[string_table],0,7
+        # Match the first four meaningful fields directly from the full inner string.
         fields_match = re.match(
-            r"\d+,\d+,(\d+),\"([^\"]+)\",(\d+),",
+            r"\d+,(\d+),\"([^\"]+)\",(\d+),",
             inner,
         )
         if not fields_match:
