@@ -40,3 +40,12 @@ cronometer-mcp = "cronometer_mcp.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["cronometer_mcp"]
+
+[tool.pytest.ini_options]
+# drift and live tests hit cronometer.com; a plain run stays offline.
+# Select them with -m drift or -m live (a later -m overrides this one).
+addopts = "-m 'not drift and not live'"
+markers = [
+    "drift: checks Cronometer's live GWT policy; network, no login",
+    "live: logs in to a real Cronometer account and writes to 2000-01-01",
+]

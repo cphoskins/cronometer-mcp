@@ -1,0 +1,54 @@
+name: Cronometer drift check
+
+# Daily check that the RPC templates still match Cronometer's live
+# serialization policy (tests marked drift; no login, no credentials).
+on:
+  schedule:
+    - cron: "0 11 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e . pytest
+
+      - name: Run drift check
+        id: drift
+        shell: bash  # implies pipefail, so tee keeps pytest's exit code
+        run: python -m pytest -m drift -q 2>&1 | tee drift.log
+
+      - name: Open or update the drift issue
+        if: failure() && steps.drift.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create drift --color B60205 --description "Cronometer API drift" 2>/dev/null || true
+          { echo "Drift check failed: $RUN_URL"; echo; echo '```'; tail -40 drift.log; echo '```'; } > body.md
+          open=$(gh issue list --label drift --state open --json number --jq '.[0].number')
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body-file body.md
+          else
+            gh issue create --title "Cronometer drift check failed" --label drift --body-file body.md
+          fi
+
+      # Scheduled workflows in public repos stop after 60 days without
+      # repository activity; re-enabling each run resets that clock.
+      - name: Keep the schedule alive
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow enable drift.yml
