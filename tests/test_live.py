@@ -25,6 +25,8 @@ from cronometer_mcp.client import CronometerClient
 pytestmark = pytest.mark.live
 
 TEST_DAY = date(2000, 1, 1)
+SERVINGS_COLUMNS = {"Day", "Group", "Food Name", "Amount"}
+BIOMETRICS_COLUMNS = {"Day", "Metric", "Unit", "Amount"}
 TODAY = date.today()
 WEEK_AGO = TODAY - timedelta(days=7)
 
@@ -52,21 +54,24 @@ def test_day_exports(c):
     )
 
 
-def _rows(csv_text: str) -> list[dict]:
-    return list(csv.DictReader(io.StringIO(csv_text)))
-
-
 def require_clean_day(servings_csv: str, biometrics_csv: str) -> None:
-    """Fail unless both exports are real CSVs with no rows."""
-    for name, text in (("servings", servings_csv), ("biometrics", biometrics_csv)):
-        if "Day" not in next(csv.reader(io.StringIO(text)), []):
-            pytest.fail(f"The {name} export has no Day column. Not writing.")
-    servings, biometrics = _rows(servings_csv), _rows(biometrics_csv)
-    if servings or biometrics:
-        pytest.fail(
-            f"Leftover entries on {TEST_DAY} (servings={len(servings)}, "
-            f"biometrics={len(biometrics)}); clean up first. Not writing."
-        )
+    """Fail unless both exports are well-formed CSVs with no rows."""
+    exports = (
+        ("servings", servings_csv, SERVINGS_COLUMNS),
+        ("biometrics", biometrics_csv, BIOMETRICS_COLUMNS),
+    )
+    for name, text, columns in exports:
+        try:
+            rows = list(csv.reader(io.StringIO(text), strict=True))
+        except csv.Error as e:
+            pytest.fail(f"The {name} export is not valid CSV ({e}). Not writing.")
+        if not rows or not columns <= set(rows[0]):
+            pytest.fail(f"The {name} export is missing columns. Not writing.")
+        if rows[1:]:
+            pytest.fail(
+                f"{len(rows) - 1} leftover {name} rows on {TEST_DAY}; "
+                "clean up first. Not writing."
+            )
 
 
 def write_round_trips(c) -> None:
@@ -89,7 +94,7 @@ def write_round_trips(c) -> None:
 
 def test_servings_export_columns(test_day_exports):
     header = next(csv.reader(io.StringIO(test_day_exports[0])), [])
-    assert {"Day", "Group", "Food Name", "Amount"} <= set(header)
+    assert SERVINGS_COLUMNS <= set(header)
 
 
 def test_food_search_and_details(c):
