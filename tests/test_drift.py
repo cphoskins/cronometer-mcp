@@ -44,6 +44,7 @@ def missing_signatures(
     templates: dict[str, set[str]], policy: set[str]
 ) -> dict[str, set[str]]:
     """Template name -> signatures the policy no longer accepts."""
+    assert templates and policy, "empty scan: the check would pass without checking"
     return {
         name: sigs - policy for name, sigs in templates.items() if sigs - policy
     }
@@ -86,6 +87,16 @@ def test_missing_signatures_names_changed_type():
     assert missing_signatures(templates, policy) == {
         "GWT_UPDATE_DIARY": {"com.cronometer.shared.entries.models.Serving/2553599101"}
     }
+
+
+def test_empty_scan_cannot_pass():
+    """Offline: an empty template or policy scan is an error, not a clean result."""
+    with pytest.raises(AssertionError):
+        missing_signatures({}, set())
+    with pytest.raises(AssertionError):
+        missing_signatures({}, {"a.B/123456"})
+    with pytest.raises(AssertionError):
+        missing_signatures({"GWT_X": {"a.B/123456"}}, set())
 
 
 def test_templates_found():

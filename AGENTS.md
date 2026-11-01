@@ -31,7 +31,7 @@ Instructions for coding agents working in this repo.
   runs it daily and opens or comments on an issue labelled `drift`.
 - `pytest -m live` logs in with `CRONOMETER_USERNAME` / `CRONOMETER_PASSWORD` and writes to the
   real account. Don't run it casually. Writes go only to 2000-01-01 and are refused if that day
-  already has entries.
+  already has servings or biometrics (notes and exercises aren't checked).
 - Cronometer rations CSV exports per account; going over returns HTTP 429 for hours and breaks the
   MCP's own reads too. The live tests make exactly two exports per run. Don't add more, and don't
   loop export calls while debugging.

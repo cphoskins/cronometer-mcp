@@ -4,16 +4,18 @@ Run with ``pytest -m live``; needs CRONOMETER_USERNAME and CRONOMETER_PASSWORD.
 
 Cronometer rations its CSV export per account (HTTP 429 for hours once
 exceeded, which also breaks the MCP's own reads), so a run makes exactly two
-export calls, both for TEST_DAY: servings and biometrics. They check the
-servings CSV header and that TEST_DAY is empty before anything is written.
-Writes touch TEST_DAY only and are checked by add-then-remove of the
-returned id, without further exports. A failed remove is never cleaned up
-automatically; the next run's empty check refuses to write until a person
-has looked.
+export calls, both for TEST_DAY: servings and biometrics. Both must be real
+CSVs with no rows before anything is written; other entry types (notes,
+exercises) aren't checked, since that would take more exports and the writes
+only remove the ids they added. Writes touch TEST_DAY only and are checked by
+add-then-remove of the returned id, without further exports. The first failure
+stops the writes. A failed remove is never cleaned up automatically; the next
+run's empty check refuses to write until a person has looked.
 """
 
 import csv
 import io
+import os
 from datetime import date, timedelta
 
 import pytest
@@ -34,9 +36,16 @@ def c():
     return client
 
 
+def refuse_parallel_run():
+    # Each xdist worker would make its own two exports.
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        pytest.fail("Live tests must not run in parallel: export budget is per run.")
+
+
 @pytest.fixture(scope="module")
 def test_day_exports(c):
     """The run's only two exports: (servings CSV text, biometrics CSV text)."""
+    refuse_parallel_run()
     return (
         c.export_raw("servings", TEST_DAY, TEST_DAY),
         c.export_raw("biometrics", TEST_DAY, TEST_DAY),
@@ -45,6 +54,34 @@ def test_day_exports(c):
 
 def _rows(csv_text: str) -> list[dict]:
     return list(csv.DictReader(io.StringIO(csv_text)))
+
+
+def require_clean_day(servings_csv: str, biometrics_csv: str) -> None:
+    """Fail unless both exports are real CSVs with no rows."""
+    for name, text in (("servings", servings_csv), ("biometrics", biometrics_csv)):
+        if "Day" not in next(csv.reader(io.StringIO(text)), []):
+            pytest.fail(f"The {name} export has no Day column. Not writing.")
+    servings, biometrics = _rows(servings_csv), _rows(biometrics_csv)
+    if servings or biometrics:
+        pytest.fail(
+            f"Leftover entries on {TEST_DAY} (servings={len(servings)}, "
+            f"biometrics={len(biometrics)}); clean up first. Not writing."
+        )
+
+
+def write_round_trips(c) -> None:
+    """Add then remove one serving, then one biometric. Stops at the first failure."""
+    food = c.find_foods("egg")[0]
+    added = c.add_serving(
+        food_id=food["food_id"], food_source_id=food["food_source_id"],
+        measure_id=0, quantity=50, weight_grams=50, day=TEST_DAY,
+    )
+    assert added["serving_id"]
+    assert c.remove_serving(added["serving_id"])
+
+    biometric_id = c.add_biometric("weight", 150, TEST_DAY)
+    assert biometric_id, "addBiometric succeeded but its id could not be parsed"
+    assert c.remove_biometric(biometric_id)
 
 
 # ── Reads ─────────────────────────────────────────────────────────────
@@ -89,27 +126,6 @@ def test_repeated_items(c):
 # ── Writes (TEST_DAY only) ────────────────────────────────────────────
 
 
-@pytest.fixture(scope="module")
-def clean_test_day(test_day_exports):
-    servings, biometrics = (_rows(t) for t in test_day_exports)
-    if servings or biometrics:
-        pytest.fail(
-            f"Leftover entries on {TEST_DAY} (servings={len(servings)}, "
-            f"biometrics={len(biometrics)}); clean up first. Not writing."
-        )
-
-
-def test_serving_round_trip(c, clean_test_day):
-    food = c.find_foods("egg")[0]
-    added = c.add_serving(
-        food_id=food["food_id"], food_source_id=food["food_source_id"],
-        measure_id=0, quantity=50, weight_grams=50, day=TEST_DAY,
-    )
-    assert added["serving_id"]
-    assert c.remove_serving(added["serving_id"])
-
-
-def test_biometric_round_trip(c, clean_test_day):
-    biometric_id = c.add_biometric("weight", 150, TEST_DAY)
-    assert biometric_id, "addBiometric succeeded but its id could not be parsed"
-    assert c.remove_biometric(biometric_id)
+def test_write_round_trips(c, test_day_exports):
+    require_clean_day(*test_day_exports)
+    write_round_trips(c)
