@@ -1102,8 +1102,8 @@ class CronometerClient:
 
         Cronometer Gold exposes 8 diary group slots. They arrive as settings
         keys ``DG01``-``DG08`` (display names) alongside ``DG01ON``-``DG08ON``
-        (enable flags), inside the settings map the authenticate call already
-        returns.
+        (optional enable flags), inside the settings map the authenticate call
+        returns. An omitted enable flag leaves the named slot enabled.
 
         The wire ``diary_group`` value used by updateDiary is **0-based** over
         those slots, so ``DG01`` is wire index 0. On a default account the four
@@ -1156,7 +1156,7 @@ class CronometerClient:
                 "wire_index": slot - 1,
                 "settings_key": key,
                 "name": name,
-                "enabled": value_for(f"{key}ON") == "true",
+                "enabled": value_for(f"{key}ON") in (None, "true"),
             })
         return groups
 

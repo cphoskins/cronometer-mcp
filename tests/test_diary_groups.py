@@ -171,6 +171,17 @@ class TestResolveDiaryGroup:
         assert _resolve_diary_group(_client_with(TEST_ACCOUNT), 0) == (0, None)
         assert _resolve_diary_group(_client_with(TEST_ACCOUNT), "4") == (4, None)
 
+    @pytest.mark.parametrize("wire_index,selection", [
+        (2, 2), (2, "Lunch"), (3, 3), (3, "Dinner"),
+    ])
+    def test_resolves_group_when_enable_setting_is_absent(
+        self, wire_index: int, selection: int | str,
+    ) -> None:
+        settings = dict(TEST_ACCOUNT)
+        settings.pop(f"DG{wire_index + 1:02d}ON")
+
+        assert _resolve_diary_group(_client_with(settings), selection) == (wire_index, None)
+
     @pytest.mark.parametrize("bad", [8, 9, -1, 99])
     def test_rejects_out_of_range_index(self, bad):
         """Cronometer accepts these silently and the entry becomes unreachable."""
