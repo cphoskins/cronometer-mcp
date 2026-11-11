@@ -26,10 +26,11 @@ def build_settings_response(settings: dict[str, str]) -> str:
     de-duplicated, which is what breaks naive adjacency for shared values like
     "true"/"false".
     """
-    table: list[str] = ["java.lang.String/2004016611"]
-    # pad so the type ref lands on 54, matching the real payload's layout
-    while len(table) < int(STRING_TYPE_REF):
+    table: list[str] = []
+    # pad so the String type lands on ref 54, matching the real payload's layout
+    while len(table) < int(STRING_TYPE_REF) - 1:
         table.append(f"filler.{len(table)}")
+    table.append("java.lang.String/2004016611")
 
     def ref(s: str) -> str:
         if s not in table:
@@ -124,6 +125,35 @@ class TestParseDiaryGroups:
         table = CronometerClient._extract_gwt_string_table(raw)
         ref = table.index("DG06ON") + 1
         raw = raw.replace("//OK[0,0,1,", f"//OK[0,0,1,70.5,9,{ref},", 1)
+
+        groups = CronometerClient._parse_diary_groups(raw)
+        assert {g["settings_key"]: g["enabled"] for g in groups}["DG06"] is False
+
+    @pytest.mark.parametrize("key", ["DG02ON", "DG06ON"])
+    def test_readable_collision_does_not_enable_group(self, key):
+        """A stray "true" ref before the flag key's ref is not its value.
+
+        Only a [String, value, String, key] settings entry counts.
+        """
+        raw = build_settings_response(dict(DEFAULT_ACCOUNT, **{key: "false"}))
+        table = CronometerClient._extract_gwt_string_table(raw)
+        true_ref = table.index("true") + 1
+        flag_ref = table.index(key) + 1
+        raw = raw.replace("//OK[0,0,1,", f"//OK[0,0,1,{true_ref},9,{flag_ref},", 1)
+
+        groups = CronometerClient._parse_diary_groups(raw)
+        assert {g["settings_key"]: g["enabled"] for g in groups}[key[:4]] is False
+
+    def test_conflicting_settings_entries_count_as_unreadable(self):
+        """Two well-formed entries for one flag with different values: fail closed."""
+        raw = build_settings_response(DEFAULT_ACCOUNT)
+        table = CronometerClient._extract_gwt_string_table(raw)
+        ref = {s: str(i + 1) for i, s in enumerate(table)}
+        raw = raw.replace(
+            "//OK[0,0,1,",
+            f"//OK[0,0,1,{STRING_TYPE_REF},{ref['true']},{STRING_TYPE_REF},{ref['DG06ON']},",
+            1,
+        )
 
         groups = CronometerClient._parse_diary_groups(raw)
         assert {g["settings_key"]: g["enabled"] for g in groups}["DG06"] is False

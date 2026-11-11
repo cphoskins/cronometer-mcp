@@ -1133,18 +1133,28 @@ class CronometerClient:
         body = raw[: raw.rindex('["')]
         tokens = [tok for tok in body.split(",") if tok.strip()]
 
+        string_type = next(
+            (ref_of[s] for s in table if s.startswith("java.lang.String/")), None
+        )
+
         def value_for(key: str) -> str | None:
+            # Only a [String, value, String, key] settings entry counts: a bare
+            # match on the key's ref can be any other field's int. Several
+            # entries that disagree are unreadable.
             ref = ref_of.get(key)
-            if ref is None:
+            if ref is None or string_type is None:
                 return None
-            pos = next((i for i, tok in enumerate(tokens) if tok == ref), None)
-            if pos is None or pos < 2:
-                return None
-            tok = tokens[pos - 2]
-            if not tok.isdigit():
-                return None
-            i = int(tok)
-            return table[i - 1] if 0 < i <= len(table) else None
+            values = set()
+            for pos, tok in enumerate(tokens):
+                if (
+                    tok == ref and pos >= 3
+                    and tokens[pos - 1] == string_type
+                    and tokens[pos - 3] == string_type
+                    and tokens[pos - 2].isdigit()
+                ):
+                    i = int(tokens[pos - 2])
+                    values.add(table[i - 1] if 0 < i <= len(table) else None)
+            return values.pop() if len(values) == 1 else None
 
         groups = []
         for slot in range(1, DIARY_GROUP_SLOTS + 1):
