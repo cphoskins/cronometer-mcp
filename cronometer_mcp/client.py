@@ -1156,7 +1156,11 @@ class CronometerClient:
                 "wire_index": slot - 1,
                 "settings_key": key,
                 "name": name,
-                "enabled": value_for(f"{key}ON") in (None, "true"),
+                # Only a flag missing from the response means enabled; one that
+                # is present but unreadable stays disabled (fail closed).
+                "enabled": (
+                    f"{key}ON" not in ref_of or value_for(f"{key}ON") == "true"
+                ),
             })
         return groups
 

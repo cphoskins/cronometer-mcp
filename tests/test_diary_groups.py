@@ -114,6 +114,20 @@ class TestParseDiaryGroups:
         assert by_name["dinner"] == 3
         assert by_name["snacks"] == 4
 
+    def test_unreadable_enable_flag_stays_disabled(self):
+        """A flag that is present but unreadable must not count as omitted.
+
+        Another field's double followed by an int equal to the flag key's
+        ref makes the parser find the key at the wrong position.
+        """
+        raw = build_settings_response(DEFAULT_ACCOUNT)
+        table = CronometerClient._extract_gwt_string_table(raw)
+        ref = table.index("DG06ON") + 1
+        raw = raw.replace("//OK[0,0,1,", f"//OK[0,0,1,70.5,9,{ref},", 1)
+
+        groups = CronometerClient._parse_diary_groups(raw)
+        assert {g["settings_key"]: g["enabled"] for g in groups}["DG06"] is False
+
     def test_returns_empty_when_no_dg_keys(self):
         assert CronometerClient._parse_diary_groups(
             build_settings_response({"weightInKG": "80.0"})
