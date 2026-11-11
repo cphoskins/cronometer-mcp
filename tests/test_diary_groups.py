@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
-from cronometer_mcp.client import CronometerClient
+from cronometer_mcp.client import CronometerClient, DiaryGroupsUnreadable
 from cronometer_mcp.server import _resolve_diary_group
 
 
@@ -219,6 +219,73 @@ class TestDiaryGroupsFallback:
         with pytest.raises(requests.Timeout):
             c.diary_groups
         assert c._diary_groups is None  # not cached; the next call retries
+
+
+def _without_string_type(raw: str) -> str:
+    return raw.replace('"java.lang.String/2004016611"', '"x.NotAString/1"')
+
+
+# Every slot renamed to another slot's key with no flags: the DG names tie the
+# phase vote 8-8 with the DG keys, so which tokens are keys is undecidable.
+TIED_PHASE_ACCOUNT = {"weightInKG": "80.0"} | {
+    f"DG{slot:02d}": f"DG{slot % 8 + 1:02d}" for slot in range(1, 9)
+}
+
+
+class TestUnreadableDiaryGroups:
+    """DG settings that are present but unreadable must never become the
+    enabled default meals: that can enable a disabled slot or rename one."""
+
+    @pytest.mark.parametrize("raw", [
+        _without_string_type(build_settings_response(DEFAULT_ACCOUNT)),
+        build_settings_response(TIED_PHASE_ACCOUNT),
+    ], ids=["no-string-type", "tied-phase"])
+    def test_parse_raises(self, raw):
+        with pytest.raises(DiaryGroupsUnreadable):
+            CronometerClient._parse_diary_groups(raw)
+
+    def test_property_raises_and_retries_next_access(self, monkeypatch):
+        c = CronometerClient(username="u", password="p")
+        monkeypatch.setattr(c, "authenticate", lambda: None)
+
+        def unreadable():
+            raise DiaryGroupsUnreadable("unreadable")
+        monkeypatch.setattr(c, "_fetch_diary_groups", unreadable)
+
+        with pytest.raises(DiaryGroupsUnreadable):
+            c.diary_groups
+        assert c._diary_groups is None
+
+    def test_login_still_succeeds(self):
+        """Reads must keep working; only diary-group lookups fail."""
+        c = CronometerClient(username="u", password="p")
+        resp = MagicMock()
+        resp.text = _without_string_type(build_settings_response(DEFAULT_ACCOUNT))
+        c.session.post = MagicMock(return_value=resp)
+        c.session.cookies = MagicMock()
+        c.session.cookies.get = MagicMock(return_value="new_nonce")
+
+        c._gwt_authenticate()
+
+        assert c.user_id == "0"
+        assert c._diary_groups is None
+
+    def test_write_tool_reports_error_without_writing(self, monkeypatch):
+        from cronometer_mcp import server
+
+        client = MagicMock()
+        type(client).diary_groups = property(
+            lambda self: (_ for _ in ()).throw(DiaryGroupsUnreadable("unreadable"))
+        )
+        monkeypatch.setattr(server, "_get_client", lambda: client)
+
+        result = json.loads(server.add_food_entry(
+            food_id=1, food_source_id=1, weight_grams=10,
+            date="2000-01-01", diary_group="Breakfast",
+        ))
+
+        assert result["status"] == "error"
+        client.add_serving.assert_not_called()
 
 
 def _client_with(settings: dict[str, str]):

@@ -361,6 +361,14 @@ class SessionExpiredError(RuntimeError):
     """Cronometer rejected the session (expired or logged out server-side)."""
 
 
+class DiaryGroupsUnreadable(RuntimeError):
+    """The response carries diary group settings that could not be parsed.
+
+    Distinct from an account with no group settings: falling back to the
+    default meals here could enable a disabled group or rename one.
+    """
+
+
 class _GwtReader:
     """Read a GWT-RPC //OK response object by object, the way GWT does.
 
@@ -597,7 +605,13 @@ class CronometerClient:
 
         # The settings map in this same response carries the user's diary
         # groups. Parse it here so the fresh-login path costs no extra call.
-        self._diary_groups = self._parse_diary_groups(resp.text)
+        # Unreadable groups must not fail the login: leave them unfetched so
+        # diary_groups re-fetches and raises on first use.
+        try:
+            self._diary_groups = self._parse_diary_groups(resp.text)
+        except DiaryGroupsUnreadable:
+            logger.warning("Diary group settings unreadable", exc_info=True)
+            self._diary_groups = None
 
         # Update nonce from cookies
         new_nonce = self._cookie_value("sesnonce")
@@ -1122,24 +1136,35 @@ class CronometerClient:
             List of dicts ordered by wire index, each with ``wire_index``
             (int), ``settings_key`` (str), ``name`` (str) and ``enabled``
             (bool). Empty list if the response carries no DG keys.
+
+        Raises:
+            DiaryGroupsUnreadable: DG keys are present but cannot be read.
         """
+        dg_keys = [
+            f"DG{slot:02d}{suffix}"
+            for slot in range(1, DIARY_GROUP_SLOTS + 1)
+            for suffix in ("", "ON")
+        ]
         try:
             table = CronometerClient._extract_gwt_string_table(raw)
         except Exception:
+            if '"DG0' in raw:
+                raise DiaryGroupsUnreadable("string table unreadable")
             return []
         if not table:
             return []
 
         ref_of = {s: str(i + 1) for i, s in enumerate(table)}
+        if not any(k in ref_of for k in dg_keys):
+            return []
         body = raw[: raw.rindex('["')]
         tokens = [tok for tok in body.split(",") if tok.strip()]
 
         string_type = next(
             (ref_of[s] for s in table if s.startswith("java.lang.String/")), None
         )
-
         if string_type is None:
-            return []
+            raise DiaryGroupsUnreadable("no java.lang.String type in the response")
 
         positions: dict[str, list[int]] = {}
         for pos, tok in enumerate(tokens):
@@ -1161,16 +1186,11 @@ class CronometerClient:
         # same position mod 4. A value that happens to equal a DG key (a group
         # renamed "DG06") also looks like an entry key, but two tokens off that
         # phase. Take the phase most DG keys agree on; a tie is unreadable.
-        dg_keys = [
-            f"DG{slot:02d}{suffix}"
-            for slot in range(1, DIARY_GROUP_SLOTS + 1)
-            for suffix in ("", "ON")
-        ]
         phases = Counter(
             pos % 4 for k in dg_keys for pos in occurrences(k) if is_entry_key(pos)
         ).most_common(2)
         if not phases or (len(phases) == 2 and phases[0][1] == phases[1][1]):
-            return []
+            raise DiaryGroupsUnreadable("settings entry phase undecidable")
         phase = phases[0][0]
 
         def lookup(key: str) -> tuple[set[str | None], bool]:
@@ -1200,6 +1220,8 @@ class CronometerClient:
                 # is unreadable or conflicting stays disabled (fail closed).
                 "enabled": flags == {"true"} or (not flags and not unexplained),
             })
+        if not groups:
+            raise DiaryGroupsUnreadable("DG settings present but no group parsed")
         return groups
 
     def _fetch_diary_groups(self) -> list[dict]:
@@ -1228,9 +1250,10 @@ class CronometerClient:
         restored session fetches lazily on first access, so callers that never
         touch diary groups never pay for it.
 
-        Falls back to the four default meals at wire 1-4 if nothing could be
-        parsed, so a parse regression degrades to the legacy behavior rather
-        than blocking every write. A failed fetch (timeout, dead session) is
+        Falls back to the four default meals at wire 1-4 only when the
+        response carries no DG settings at all. DG settings that are present
+        but unreadable raise DiaryGroupsUnreadable instead (not cached, so the
+        next access retries): the defaults could enable a disabled group. A failed fetch (timeout, dead session) is
         not a parse regression: it raises and is retried on the next access,
         since the defaults would send writes to the wrong group on an account
         with custom groups.
