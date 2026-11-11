@@ -15,6 +15,7 @@ import logging
 import os
 import pickle
 import re
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -1137,40 +1138,67 @@ class CronometerClient:
             (ref_of[s] for s in table if s.startswith("java.lang.String/")), None
         )
 
-        def value_for(key: str) -> str | None:
-            # Only a [String, value, String, key] settings entry counts: a bare
-            # match on the key's ref can be any other field's int. Several
-            # entries that disagree are unreadable.
-            ref = ref_of.get(key)
-            if ref is None or string_type is None:
-                return None
-            values = set()
-            for pos, tok in enumerate(tokens):
-                if (
-                    tok == ref and pos >= 3
-                    and tokens[pos - 1] == string_type
-                    and tokens[pos - 3] == string_type
-                    and tokens[pos - 2].isdigit()
-                ):
+        if string_type is None:
+            return []
+
+        positions: dict[str, list[int]] = {}
+        for pos, tok in enumerate(tokens):
+            positions.setdefault(tok, []).append(pos)
+
+        def occurrences(key: str) -> list[int]:
+            return positions.get(ref_of.get(key, ""), [])
+
+        def is_entry_key(pos: int) -> bool:
+            # A [String, value, String, key] settings entry.
+            return (
+                pos >= 3
+                and tokens[pos - 1] == string_type
+                and tokens[pos - 3] == string_type
+                and tokens[pos - 2].isdigit()
+            )
+
+        # Settings entries are four tokens wide, so every real key sits at the
+        # same position mod 4. A value that happens to equal a DG key (a group
+        # renamed "DG06") also looks like an entry key, but two tokens off that
+        # phase. Take the phase most DG keys agree on; a tie is unreadable.
+        dg_keys = [
+            f"DG{slot:02d}{suffix}"
+            for slot in range(1, DIARY_GROUP_SLOTS + 1)
+            for suffix in ("", "ON")
+        ]
+        phases = Counter(
+            pos % 4 for k in dg_keys for pos in occurrences(k) if is_entry_key(pos)
+        ).most_common(2)
+        if not phases or (len(phases) == 2 and phases[0][1] == phases[1][1]):
+            return []
+        phase = phases[0][0]
+
+        def lookup(key: str) -> tuple[set[str | None], bool]:
+            """The key's settings values, and whether any occurrence is unexplained."""
+            values: set[str | None] = set()
+            unexplained = False
+            for pos in occurrences(key):
+                if pos % 4 == phase and is_entry_key(pos):
                     i = int(tokens[pos - 2])
                     values.add(table[i - 1] if 0 < i <= len(table) else None)
-            return values.pop() if len(values) == 1 else None
+                elif not (pos % 4 == (phase + 2) % 4 and tokens[pos - 1] == string_type):
+                    unexplained = True  # not another entry's value either
+            return values, unexplained
 
         groups = []
         for slot in range(1, DIARY_GROUP_SLOTS + 1):
             key = f"DG{slot:02d}"
-            name = value_for(key)
-            if name is None:
+            names, _ = lookup(key)
+            if len(names) != 1 or None in names:
                 continue
+            flags, unexplained = lookup(f"{key}ON")
             groups.append({
                 "wire_index": slot - 1,
                 "settings_key": key,
-                "name": name,
+                "name": names.pop(),
                 # Only a flag missing from the response means enabled; one that
-                # is present but unreadable stays disabled (fail closed).
-                "enabled": (
-                    f"{key}ON" not in ref_of or value_for(f"{key}ON") == "true"
-                ),
+                # is unreadable or conflicting stays disabled (fail closed).
+                "enabled": flags == {"true"} or (not flags and not unexplained),
             })
         return groups
 

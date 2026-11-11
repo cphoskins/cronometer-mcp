@@ -158,6 +158,32 @@ class TestParseDiaryGroups:
         groups = CronometerClient._parse_diary_groups(raw)
         assert {g["settings_key"]: g["enabled"] for g in groups}["DG06"] is False
 
+    @staticmethod
+    def _by_key(settings):
+        return {
+            g["settings_key"]: g
+            for g in CronometerClient._parse_diary_groups(
+                build_settings_response(settings)
+            )
+        }
+
+    def test_value_equal_to_a_name_key_is_not_that_key(self):
+        """Overlapping windows: DG08's value "DG06" must not shadow the DG06 entry."""
+        groups = self._by_key(dict(DEFAULT_ACCOUNT, DG08="DG06"))
+        assert groups["DG08"]["name"] == "DG06"
+        assert groups["DG06"]["name"] == "Group 6"
+
+    def test_value_equal_to_an_omitted_flag_key_does_not_disable(self):
+        settings = dict(DEFAULT_ACCOUNT, DG08="DG04ON")
+        settings.pop("DG04ON")
+        assert self._by_key(settings)["DG04"]["enabled"] is True
+
+    def test_value_equal_to_an_absent_name_key_invents_no_group(self):
+        settings = dict(DEFAULT_ACCOUNT, DG08="DG06")
+        settings.pop("DG06")
+        settings.pop("DG06ON")
+        assert "DG06" not in self._by_key(settings)
+
     def test_returns_empty_when_no_dg_keys(self):
         assert CronometerClient._parse_diary_groups(
             build_settings_response({"weightInKG": "80.0"})
